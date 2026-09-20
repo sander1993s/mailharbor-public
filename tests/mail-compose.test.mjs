@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { simpleParser } from 'mailparser';
 import { createMailComposer } from '../server/mail-compose.mjs';
 import { mailFingerprint } from '../server/mailboxes.mjs';
+import tls from 'node:tls';
 
 const original = Buffer.from('From: Author <author@example.test>\r\nReply-To: Replies <reply@example.test>\r\nTo: Sender <sender@example.test>, peer@example.test\r\nCc: other@example.test\r\nBcc: hidden@example.test\r\nSubject: Hello\r\nMessage-ID: <original@example.test>\r\nReferences: <parent@example.test>\r\nDate: Fri, 18 Sep 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nOriginal body\r\n');
 function memoryStore() {
@@ -176,6 +177,33 @@ test('existing Microsoft IMAP-only grant requires explicit reconnect for SMTP wi
   const { composer, transports } = await fixture({ account: { provider: 'microsoft', auth: { type: 'oauth' } } });
   assert.equal(composer.settings().accounts[0].needsReconnect, true);
   await assert.rejects(composer.send(payload()), error => error.code === 'smtp_login_required'); assert.equal(transports.length, 0); composer.close();
+});
+
+test('SMTP runtime certificate supplements and legacy passwords survive same-host settings changes without disclosure', async () => {
+  const certificates = [tls.rootCertificates[0]];
+  const { composer, store, transports, calls } = await fixture({ account: { smtp: {
+    host: 'smtp.example.test', port: 465, sentCopy: true, password: 'LEGACY_SMTP_PASSWORD', tlsCaCertificates: certificates
+  } } });
+  const initial = store.read().accounts[0];
+  await composer.verify({ accountId: 'fixture' });
+  assert.equal(transports[0].auth.pass, 'LEGACY_SMTP_PASSWORD');
+  assert.equal(transports[0].tls.rejectUnauthorized, true);
+  assert.equal(transports[0].tls.allowPartialTrustChain, false);
+  assert.ok(transports[0].tls.ca.length > certificates.length);
+  await composer.configure({ accountId: 'fixture', host: 'smtp.example.test', port: 587, sentCopy: false, useMailboxPassword: false });
+  const saved = store.read().accounts[0];
+  assert.deepEqual(saved.smtp.tlsCaCertificates, certificates);
+  assert.equal(saved.auth.smtpPassword, 'LEGACY_SMTP_PASSWORD');
+  assert.equal(saved.auth.password, initial.auth.password);
+  assert.equal(saved.revision, initial.revision);
+  assert.doesNotMatch(JSON.stringify(composer.settings()), /BEGIN CERTIFICATE|LEGACY_SMTP_PASSWORD/u);
+  await composer.verify({ accountId: 'fixture' });
+  assert.equal(transports[1].auth.pass, 'LEGACY_SMTP_PASSWORD');
+  assert.equal(transports[1].requireTLS, true);
+  await composer.configure({ accountId: 'fixture', host: 'different.example.test', port: 587, sentCopy: false });
+  assert.equal(store.read().accounts[0].smtp.tlsCaCertificates, undefined);
+  assert.equal(calls.some(value => value[0] === 'smtp'), false, 'Connection verification must not send a message.');
+  composer.close();
 });
 
 test('rich text sanitizes dangerous HTML, builds multipart alternative with plain text, and enforces safe links', async () => {

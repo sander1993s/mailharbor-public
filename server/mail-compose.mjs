@@ -637,7 +637,8 @@ export function createMailComposer({ accounts, store, resolveMessage, invalidate
     await store.update(data => {
       const current = getAccountFromStore(data, accounts, account.id);
       if (!current || current.revision !== account.revision) fail('stale_message');
-      current.smtp = { ...endpoint, username: input.username || defaults.username || account.email, sentCopy: input.sentCopy };
+      current.smtp = { ...endpoint, username: input.username || defaults.username || account.email, sentCopy: input.sentCopy,
+        ...(current.smtp?.host === endpoint.host && current.smtp.tlsCaCertificates !== undefined ? { tlsCaCertificates: current.smtp.tlsCaCertificates } : {}) };
       if (input.useMailboxPassword) delete current.auth.smtpPassword;
       else if (input.password || defaults.password) current.auth.smtpPassword = input.password || defaults.password;
     });

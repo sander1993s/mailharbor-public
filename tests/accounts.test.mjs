@@ -430,3 +430,70 @@ test('Microsoft 365 uses organization-capable OAuth and its own SMTP endpoint', 
   await assert.rejects(accounts.connectPassword({ id, password: 'TEST_PASSWORD' }), { code: 'invalid_request' });
   accounts.close();
 });
+
+test('legacy Microsoft registrations retain consumer authority and credentials without reconnecting', async () => {
+  const saved = { clientId: '11111111-2222-3333-4444-555555555555', clientSecret: 'TEST_SECRET', authority: 'consumers', revision: 'legacy-registration' };
+  const legacy = { ...ACCOUNT_PRESETS.find(item => item.provider === 'microsoft'), revision: 'legacy-account', archivePath: 'Archive', connectedAt: '2026-01-01T00:00:00Z', auth: {
+    type: 'oauth', accessToken: 'OLD_ACCESS', refreshToken: 'KEEP_REFRESH', expiresAt: 0,
+    oauthScope: 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access'
+  } };
+  const requests = [];
+  const { accounts, store } = fixture({ store: memoryStore({ schema: 1, accounts: [legacy], providers: { microsoft: saved } }),
+    testAccount: async () => assert.fail('Refreshing an existing account must not reconnect it.'),
+    fetcher: async (url, options) => {
+      requests.push({ url, params: new URLSearchParams(options.body) });
+      const result = response({ refresh_token: undefined }); Object.defineProperty(result, 'url', { value: url }); return result;
+    }
+  });
+  const options = await accounts.connectionOptions(accounts.get(legacy.id));
+  assert.equal(requests[0].url, 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token');
+  assert.equal(requests[0].params.get('scope'), legacy.auth.oauthScope);
+  assert.equal(options.auth.accessToken, 'TEST_ACCESS');
+  assert.equal(store.read().accounts[0].auth.refreshToken, 'KEEP_REFRESH');
+  for (const key of ['id', 'email', 'host', 'revision', 'archivePath', 'connectedAt']) assert.equal(store.read().accounts[0][key], legacy[key]);
+  assert.deepEqual(store.read().providers.microsoft, saved);
+  await accounts.configureProvider({ provider: 'microsoft', clientId: saved.clientId });
+  assert.deepEqual(store.read().providers.microsoft, saved, 'Saving unchanged credentials preserves the migrated authority and registration revision.');
+  const url = new URL(accounts.startOAuth({ id: legacy.id }, owner).url);
+  assert.equal(url.pathname, '/consumers/oauth2/v2.0/authorize');
+  assert.equal(accounts.registrations().find(value => value.id === 'microsoft').authority, 'consumers');
+  accounts.close();
+});
+
+test('Microsoft authority is bounded, defaults to common, and applies to authorization-code exchanges', async () => {
+  const { accounts } = fixture();
+  const client = { provider: 'microsoft', clientId: '11111111-2222-3333-4444-555555555555', clientSecret: 'TEST_SECRET' };
+  for (const authority of ['https://attacker.example.test', '../consumers', '', null, ['consumers']]) {
+    await assert.rejects(accounts.configureProvider({ ...client, authority }), { code: 'invalid_request' });
+  }
+  await assert.rejects(accounts.configureProvider({ ...registration, authority: 'consumers' }), { code: 'invalid_request' });
+  await accounts.configureProvider(client);
+  assert.equal(accounts.registrations().find(value => value.id === 'microsoft').authority, 'common');
+  accounts.close();
+  for (const authority of ['common', 'consumers', 'organizations']) {
+    const requests = [];
+    const current = fixture({ fetcher: async url => { requests.push(url); return response(); } });
+    await current.accounts.configureProvider({ ...client, authority });
+    const url = new URL(current.accounts.startOAuth({ id: 'private-outlook' }, owner).url);
+    assert.equal(url.pathname, `/${authority}/oauth2/v2.0/authorize`);
+    await current.accounts.finishOAuth('microsoft', new URLSearchParams({ state: url.searchParams.get('state'), code: 'TEST_CODE' }), owner);
+    assert.equal(requests[0], `https://login.microsoftonline.com/${authority}/oauth2/v2.0/token`);
+    current.accounts.close();
+  }
+});
+
+test('authority changes invalidate an in-flight refresh without overwriting the saved account', async () => {
+  const entered = gate(), release = gate();
+  const client = { provider: 'microsoft', clientId: '11111111-2222-3333-4444-555555555555', clientSecret: 'TEST_SECRET', authority: 'consumers' };
+  const { accounts, store } = fixture({ fetcher: async () => { entered.resolve(); await release.promise; return response({ access_token: 'LATE_ACCESS' }); } });
+  await accounts.configureProvider(client);
+  await store.update(data => { const account = data.accounts.find(item => item.id === 'private-outlook'); account.revision = 'legacy-revision'; account.auth = { type: 'oauth', accessToken: 'KEEP_ACCESS', refreshToken: 'KEEP_REFRESH', expiresAt: 0 }; });
+  const refreshing = accounts.connectionOptions(accounts.get('private-outlook'));
+  const rejected = assert.rejects(refreshing, { code: 'stale_message' });
+  await entered.promise;
+  await accounts.configureProvider({ ...client, authority: 'common' });
+  release.resolve(); await rejected;
+  assert.equal(accounts.get('private-outlook').auth.accessToken, 'KEEP_ACCESS');
+  assert.equal(accounts.get('private-outlook').auth.refreshToken, 'KEEP_REFRESH');
+  accounts.close();
+});

@@ -2,7 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { MailHarborError } from './validation.mjs';
 
 import { MAIL_PROVIDERS, MAX_ACCOUNTS, accountDefinition, incomingEndpoint, smtpEndpoint } from './providers.mjs';
-import { smtpTlsOptions } from './smtp-tls.mjs';
+import { imapTlsOptions } from './smtp-tls.mjs';
 
 const PROVIDERS = Object.freeze({
   google: { authorize: 'https://accounts.google.com/o/oauth2/v2/auth', token: 'https://oauth2.googleapis.com/token', scope: 'https://mail.google.com/' },
@@ -13,6 +13,18 @@ const TOKEN_ERRORS = Object.freeze({
   invalid_scope: 'oauth_invalid_scope', invalid_grant: 'oauth_invalid_grant'
 });
 const fail = code => { throw new MailHarborError(code); };
+const MICROSOFT_AUTHORITIES = new Set(['common', 'consumers', 'organizations']);
+function authority(registration) {
+  const value = registration?.authority ?? 'common';
+  if (!MICROSOFT_AUTHORITIES.has(value)) fail('configuration_error');
+  return value;
+}
+function endpoints(provider, registration) {
+  const value = PROVIDERS[provider];
+  if (provider !== 'microsoft') return value;
+  const tenant = authority(registration);
+  return { ...value, authorize: value.authorize.replace('/common/', `/${tenant}/`), token: value.token.replace('/common/', `/${tenant}/`) };
+}
 function strict(body, keys) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !keys.includes(key))) fail('invalid_request');
 }
@@ -24,7 +36,7 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
   const generations = new Map();
   let closed = false;
   const callback = provider => `${publicOrigin}/oauth/${provider}/callback`;
-  const sameRegistration = (a, b) => Boolean(a && b && a.clientId === b.clientId && a.clientSecret === b.clientSecret);
+  const sameRegistration = (a, b) => Boolean(a && b && a.clientId === b.clientId && a.clientSecret === b.clientSecret && authority(a) === authority(b));
   function invalidate(id) {
     const generation = (generations.get(id) ?? 0) + 1;
     generations.set(id, generation);
@@ -37,12 +49,13 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
 
   function definition(id) { if (closed) fail('busy'); return store.read().accounts.find(item => item.id === id) ?? fail('mailbox_login_required'); }
   function account(id) { const value = definition(id); if (!value.auth) fail('mailbox_login_required'); return value; }
-  async function tokenRequest(provider, params) {
+  async function tokenRequest(provider, params, registration) {
+    const tokenEndpoint = endpoints(provider, registration).token;
     let response;
     try {
-      response = await fetcher(PROVIDERS[provider].token, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params), redirect: 'error', signal: AbortSignal.timeout(20000) });
+      response = await fetcher(tokenEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params), redirect: 'error', signal: AbortSignal.timeout(20000) });
     } catch { fail('oauth_token_transport'); }
-    if (!response || response.redirected || (response.url && response.url !== PROVIDERS[provider].token)) fail('oauth_token_response');
+    if (!response || response.redirected || (response.url && response.url !== tokenEndpoint)) fail('oauth_token_response');
     let text;
     try { text = await response.text(); } catch { fail('oauth_token_transport'); }
     if (typeof text !== 'string' || text.length > 65536) fail('oauth_token_response');
@@ -82,7 +95,7 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
       // Existing IMAP-only grants must continue refreshing without demanding new
       // consent. SMTP permission is requested only by an explicit reconnect.
       if (value.provider === 'microsoft') params.scope = current.auth.oauthScope || 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access';
-      const refreshed = await tokenRequest(value.provider, params);
+      const refreshed = await tokenRequest(value.provider, params, registration);
       await store.update(data => {
         const saved = data.accounts.find(item => item.id === value.id);
         if (closed || !saved || saved.revision !== current.revision || !sameRegistration(data.providers[value.provider], registration)) fail('stale_message');
@@ -115,28 +128,32 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
     },
     registrations() {
       const providers = store.read().providers;
-      return Object.entries(PROVIDERS).map(([id, value]) => ({ id, configured: Boolean(providers[id]), clientId: providers[id]?.clientId ?? '', callback: callback(id), scope: value.scope }));
+      return Object.entries(PROVIDERS).map(([id, value]) => ({ id, configured: Boolean(providers[id]), clientId: providers[id]?.clientId ?? '', callback: callback(id), scope: value.scope,
+        ...(id === 'microsoft' ? { authority: authority(providers[id]) } : {}) }));
     },
     get: account,
     async configureProvider(body) {
       if (closed) fail('busy');
-      strict(body, ['provider', 'clientId', 'clientSecret']);
+      strict(body, ['provider', 'clientId', 'clientSecret', 'authority']);
       if (!Object.hasOwn(PROVIDERS, body.provider) || !field(body.clientId, 512) || (body.clientSecret !== undefined && body.clientSecret !== '' && !field(body.clientSecret, 4096))) fail('invalid_request');
       if (body.provider === 'google' && !/^[A-Za-z0-9_.-]+\.apps\.googleusercontent\.com$/.test(body.clientId)) fail('invalid_request');
       if (body.provider === 'microsoft' && !/^[a-f0-9-]{36}$/i.test(body.clientId)) fail('invalid_request');
+      if (body.authority !== undefined && (body.provider !== 'microsoft' || !MICROSOFT_AUTHORITIES.has(body.authority))) fail('invalid_request');
       await store.update(data => {
         if (closed) fail('busy');
         const old = data.providers[body.provider];
         const secret = body.clientSecret || (old?.clientId === body.clientId ? old.clientSecret : '');
         if (!secret) fail('invalid_request');
-        if (!sameRegistration(old, { clientId: body.clientId, clientSecret: secret })) {
+        const next = { clientId: body.clientId, clientSecret: secret,
+          ...(body.provider === 'microsoft' ? { authority: body.authority ?? (old?.clientId === body.clientId ? authority(old) : 'common') } : {}) };
+        if (!sameRegistration(old, next)) {
           for (const item of data.accounts) if (item.provider === body.provider) invalidate(item.id);
         }
         if (old && old.clientId !== body.clientId) for (const item of data.accounts) if (item.provider === body.provider && item.auth?.type === 'oauth') {
           item.auth = null; item.connectedAt = null; item.revision = randomBytes(16).toString('hex');
         }
-        data.providers[body.provider] = { clientId: body.clientId, clientSecret: secret,
-          revision: sameRegistration(old, { clientId: body.clientId, clientSecret: secret }) && old.revision ? old.revision : randomBytes(16).toString('hex') };
+        data.providers[body.provider] = { ...next,
+          revision: sameRegistration(old, next) && old.revision ? old.revision : randomBytes(16).toString('hex') };
       });
     },
     async connectPassword(body) {
@@ -167,7 +184,7 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
       const generation = invalidate(info.id);
       const previousRevision = store.read().accounts.find(value => value.id === info.id)?.revision;
       oauth.set(state, { id: info.id, provider: info.provider, owner, verifier, generation, previousRevision, registration: { ...registration }, expires: Date.now() + 600000 });
-      const url = new URL(PROVIDERS[info.provider].authorize);
+      const url = new URL(endpoints(info.provider, registration).authorize);
       for (const [key, value] of Object.entries({ client_id: registration.clientId, redirect_uri: callback(info.provider), response_type: 'code', scope: PROVIDERS[info.provider].scope, state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', login_hint: info.email, ...(info.provider === 'google' ? { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' } : { prompt: 'select_account' }) })) url.searchParams.set(key, value);
       return { url: url.href };
     },
@@ -179,7 +196,7 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
       assertCurrent(pending.id, pending.generation);
       if (!sameRegistration(store.read().providers[provider], pending.registration)) fail('stale_message');
       if (params.get('error') || !field(params.get('code'), 8192)) fail('mailbox_login_required');
-      const auth = await tokenRequest(provider, { grant_type: 'authorization_code', client_id: pending.registration.clientId, client_secret: pending.registration.clientSecret, code: params.get('code'), redirect_uri: callback(provider), code_verifier: pending.verifier });
+      const auth = await tokenRequest(provider, { grant_type: 'authorization_code', client_id: pending.registration.clientId, client_secret: pending.registration.clientSecret, code: params.get('code'), redirect_uri: callback(provider), code_verifier: pending.verifier }, pending.registration);
       assertCurrent(pending.id, pending.generation);
       if (!sameRegistration(store.read().providers[provider], pending.registration)) fail('stale_message');
       if (!field(auth.refreshToken, 32768)) {
@@ -228,7 +245,7 @@ export function createAccounts({ store, publicOrigin, testAccount, fetcher = fet
       if (value.auth.type === 'oauth' && !['google', 'microsoft'].includes(value.provider)) fail('invalid_request');
       return { host: incoming.host, port: incoming.port, secure: incoming.security === 'tls', doSTARTTLS: incoming.security === 'starttls',
         auth: value.auth.type === 'password' ? { user: info.username ?? info.email, pass: value.auth.password } : { user: info.username ?? info.email, accessToken: await accessToken(value) },
-        logger: false, disableAutoIdle: true, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 45000, tls: smtpTlsOptions(info, incoming.host) };
+        logger: false, disableAutoIdle: true, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 45000, tls: imapTlsOptions(info, incoming.host) };
     },
     smtpSettings(value) {
       const current = account(value.id);
