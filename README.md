@@ -1,4 +1,8 @@
+<p align="center"><img src="web/logo.png" width="160" alt="MailHarbor sailing ship logo"></p>
+
 # MailHarbor
+
+Website: [Smet Software Solutions](https://smetsoftwaresolutions.be).
 
 MailHarbor is a self-hosted email app for browsing multiple mailboxes, composing mail, reviewing AI briefings, and organizing messages from a phone or desktop browser. An optional Thunderbird add-on shares the briefing service.
 

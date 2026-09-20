@@ -38,7 +38,7 @@ NODE = REMOTE_PATH(os.environ.get("MAILHARBOR_NODE", "/usr/bin/node"))
 ROOT_FILES = {"package.json", "package-lock.json", "README.md", "CONTRACT.md", ".gitignore", ".gitattributes", "LICENSE", "SECURITY.md", "CONTRIBUTING.md"}
 SUFFIXES = {
     "server": {".mjs"}, "web": {".html", ".mjs", ".css", ".svg", ".png", ".webmanifest"},
-    "addon": {".html", ".mjs", ".js", ".css", ".svg", ".json"},
+    "addon": {".html", ".mjs", ".js", ".css", ".svg", ".png", ".json"},
     "tests": {".mjs"}, "scripts": {".mjs", ".py", ".ps1"}, "docs": {".md"},
 }
 MAX_FILE = 2 * 1024 * 1024

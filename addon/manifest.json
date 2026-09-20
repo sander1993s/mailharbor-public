@@ -3,12 +3,41 @@
   "name": "MailHarbor",
   "version": "0.1.1",
   "description": "A calm, spoken briefing for your inboxes, with cleanup you control.",
-  "browser_specific_settings": {"gecko": {"id": "mailharbor@local", "strict_min_version": "140.0"}},
-  "permissions": ["accountsRead", "messagesRead", "messagesMove", "messagesUpdate", "storage"],
-  "optional_host_permissions": ["https://*/*"],
-  "background": {"scripts": ["background.js"]},
-  "action": {"default_title": "Open MailHarbor", "default_icon": "icon.svg"},
-  "icons": {"32": "icon.svg", "64": "icon.svg"},
-  "options_ui": {"page": "options.html", "open_in_tab": true},
-  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"}
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mailharbor@local",
+      "strict_min_version": "140.0"
+    }
+  },
+  "permissions": [
+    "accountsRead",
+    "messagesRead",
+    "messagesMove",
+    "messagesUpdate",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "action": {
+    "default_title": "Open MailHarbor",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "32": "icon.png",
+    "64": "icon.png",
+    "128": "icon.png"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"
+  }
 }

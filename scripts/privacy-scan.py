@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import zlib
 
 EMAIL = re.compile(r"[A-Za-z0-9][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
 PUBLIC_EMAILS = {'notify@web3forms.com'}
@@ -26,6 +27,19 @@ RULES = [
 ]
 FORBIDDEN = re.compile(r'(?:^|/)(?:\.env(?:\..*)?|accounts\.(?:key|enc)|pairing-token|config(?:\.local)?\.json|credentials[^/]*|[^/]*\.(?:sqlite(?:-wal|-shm)?|db|eml|mbox|pst|ost|pem|key|p12|pfx|log|har|zip|gz|dump|enc))$', re.I)
 EXCLUDED_DIRS = {'.analysis', '.git', 'node_modules', 'state', 'data', 'backups', 'agy-home', 'coverage', '__pycache__'}
+
+def clean_png(data):
+    if not data.startswith(b'\x89PNG\r\n\x1a\n'): return False
+    allowed = {b'IHDR', b'PLTE', b'tRNS', b'IDAT', b'IEND', b'sRGB', b'gAMA', b'cHRM', b'pHYs'}
+    position = 8; chunks = []
+    while position + 12 <= len(data):
+        size = int.from_bytes(data[position:position + 4], 'big')
+        end = position + size + 12; kind = data[position + 4:position + 8]
+        if end > len(data) or kind not in allowed: return False
+        if zlib.crc32(data[position + 4:end - 4]) != int.from_bytes(data[end - 4:end], 'big'): return False
+        chunks.append(kind); position = end
+        if kind == b'IEND': return size == 0 and position == len(data) and chunks[0] == b'IHDR' and chunks.count(b'IHDR') == 1 and b'IDAT' in chunks
+    return False
 
 def git(root, *args):
     result = subprocess.run(['git', '-c', 'core.quotepath=false', *args], cwd=root, capture_output=True, check=True)
@@ -44,10 +58,10 @@ def scan(name, data, denylist=()):
         findings.append((name, 0, 'private filename'))
     if b'\0' in data:
         # Only reviewed PNG icons are allowed binary assets; reject embedded metadata.
-        if name not in {'web/icon-192.png', 'web/icon-512.png'} or not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        if name not in {'web/icon-192.png', 'web/icon-512.png', 'web/logo.png', 'addon/icon.png'} or not data.startswith(b'\x89PNG\r\n\x1a\n'):
             findings.append((name, 0, 'unreviewed binary'))
-        elif any(chunk in data for chunk in (b'tEXt', b'zTXt', b'iTXt', b'eXIf')):
-            findings.append((name, 0, 'image metadata'))
+        elif not clean_png(data):
+            findings.append((name, 0, 'image metadata or malformed PNG'))
         return findings
     try: text = data.decode('utf-8-sig')
     except UnicodeDecodeError: return findings + [(name, 0, 'non-UTF-8 file')]

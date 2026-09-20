@@ -1,6 +1,6 @@
 // Only the public application shell is cached. Mail, sessions, and OAuth never enter Cache Storage.
 const CACHE = 'mailharbor-shell-v0.8.6';
-const ASSETS = ['/', '/index.html', '/app.mjs', '/account-setup.mjs', '/api-request.mjs', '/mail.mjs', '/mail-attachments.mjs', '/mail-attachments.css', '/mail-conversation.mjs', '/mail-tools.mjs', '/mail-tools.css', '/telegram-settings.mjs', '/controls.mjs', '/controls.css', '/mail-content.mjs', '/mail-content.css', '/compose.mjs', '/compose.css', '/filing.mjs', '/processing.mjs', '/processing.css', '/styles.css', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest', '/vendor/pdfjs/pdf.mjs', '/vendor/pdfjs/pdf.worker.mjs'];
+const ASSETS = ['/', '/index.html', '/app.mjs', '/account-setup.mjs', '/api-request.mjs', '/mail.mjs', '/mail-attachments.mjs', '/mail-attachments.css', '/mail-conversation.mjs', '/mail-tools.mjs', '/mail-tools.css', '/telegram-settings.mjs', '/controls.mjs', '/controls.css', '/mail-content.mjs', '/mail-content.css', '/compose.mjs', '/compose.css', '/filing.mjs', '/processing.mjs', '/processing.css', '/styles.css', '/logo.png', '/manifest.webmanifest', '/vendor/pdfjs/pdf.mjs', '/vendor/pdfjs/pdf.worker.mjs'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
 });
@@ -20,7 +20,7 @@ self.addEventListener('fetch', event => {
 // Push contains only a generic signal; subjects and senders stay on the server.
 self.addEventListener('push', event => {
   event.waitUntil(self.registration.showNotification('New mail', {
-    body: 'Open MailHarbor to check your mailboxes.', icon: '/icon-192.png', badge: '/icon-192.png', tag: 'mailharbor-new-mail'
+    body: 'Open MailHarbor to check your mailboxes.', icon: '/logo.png', badge: '/logo.png', tag: 'mailharbor-new-mail'
   }));
 });
 self.addEventListener('notificationclick', event => {

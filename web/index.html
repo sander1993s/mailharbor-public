@@ -7,8 +7,8 @@
   <meta name="description" content="All your inboxes in one private place, with cleanup you control.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>MailHarbor</title>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="icon" href="/logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="/logo.png">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/processing.css">
@@ -24,7 +24,7 @@
   <main id="main">
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <section id="login" class="login panel" hidden aria-labelledby="login-title">
-      <p class="eyebrow">PRIVATE HOMESERVER</p><h1 id="login-title">Welcome aboard.</h1>
+      <img src="/logo.png" alt="MailHarbor" width="96" height="96"><p class="eyebrow">PRIVATE HOMESERVER</p><h1 id="login-title">Welcome aboard.</h1>
       <p>Open MailHarbor while connected to your Tailscale network. If this device needs pairing, enter your MailHarbor pairing token below.</p>
       <form id="login-form"><label class="field"><span>Pairing token</span><input id="pairing-token" type="password" autocomplete="off" required spellcheck="false"></label><button class="primary" type="submit">Pair this device</button></form>
       <button id="retry-tailscale" class="subtle">Try Tailscale connection again</button>
@@ -34,7 +34,7 @@
       <div class="mail-control-panel">
         <form id="mail-search-form" class="mail-toolbar global-mail-toolbar" role="search" aria-label="Search mail">
           <nav class="mail-search-navigation" aria-label="Main navigation">
-            <a href="#inbox" id="nav-inbox" aria-label="Inbox" title="Inbox" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h6l2 2h10v11H3z M5 7V4h6l2 2h6v3"/></svg></a>
+            <a href="#inbox" id="nav-inbox" aria-label="Inbox" title="Inbox" aria-current="page"><img src="/logo.png" alt="" width="32" height="32"></a>
             <a href="#today" id="nav-today" aria-label="AI briefings" title="AI briefings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4z M20 2v4 M18 4h4"/></svg></a>
             <a href="#accounts" id="nav-accounts" aria-label="Account settings" title="Account settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 3-.6 2.3-2 .9-2.1-.7-2 3.5L4 10.7v2.6L2.3 15l2 3.5 2.1-.7 2 .9L9 21h6l.6-2.3 2-.9 2.1.7 2-3.5-1.7-1.7v-2.6L21.7 9l-2-3.5-2.1.7-2-.9L15 3z"/><circle cx="12" cy="12" r="3"/></svg></a>
           </nav>
