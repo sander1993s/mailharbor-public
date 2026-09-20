@@ -343,6 +343,31 @@ def verify_state_backup(previous, staged, state_backup, restore_directory, env):
             "Restore verification modified the backup")
 
 
+def discard_verified_restore_copy(directory):
+    """Remove only the closed, marked test copy after restore verification passes."""
+    directory = checked(directory)
+    require(directory.name == "restore-check" and directory.is_dir() and not directory.is_symlink(),
+            "Invalid restore verification directory")
+    required = {"accounts.key", "accounts.enc", "mail-index.sqlite", ".restore-check"}
+    allowed = required | {"notification-state.sqlite"}
+    entries = list(directory.iterdir())
+    require(required <= {entry.name for entry in entries} <= allowed,
+            "Unexpected restore verification inventory")
+    # Validate every entry before deleting anything; never recurse into a directory.
+    for entry in entries:
+        checked(entry, directory)
+        require(entry.is_file() and not entry.is_symlink() and entry.stat().st_nlink == 1,
+                "Restore verification contains a linked or non-regular file")
+    marker = directory / ".restore-check"
+    require(marker.read_bytes() == b"MailHarbor isolated restore verification\n",
+            "Missing isolated restore marker")
+    for entry in entries:
+        if entry != marker:
+            entry.unlink()
+    marker.unlink()
+    directory.rmdir()
+
+
 def remote_deploy(release_id, archive_sha):
     require(sys.platform == "linux" and os.getuid() != 0, "Deploy as the existing non-root Linux user")
     require(checked(Path.home()) == checked(DEPLOY_HOME) and DEPLOY_HOME.stat().st_uid == os.getuid(), "Unexpected deployment user or home")
@@ -418,6 +443,7 @@ def remote_deploy(release_id, archive_sha):
         state_backup = checked(backup_root / "state", backup_root)
         backup_manifest = backup_state(state_directory, state_backup)
         verify_state_backup(LIVE, stage, state_backup, checked(backup_root / "restore-check", backup_root), env)
+        discard_verified_restore_copy(checked(backup_root / "restore-check", backup_root))
         print(json.dumps({"stateBackup": str(state_backup), "documents": backup_manifest["documents"],
                           "messages": backup_manifest["messages"], "backupManifestSha256": file_hash(state_backup / "backup-manifest.json")}), flush=True)
         checked(LIVE).rename(checked(backup, backup_root))

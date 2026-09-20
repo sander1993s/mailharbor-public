@@ -14,4 +14,6 @@ Keep Node.js, dependencies, the operating system, and Agy current. Review the de
 
 Back up encrypted durable state together with its matching key into private encrypted storage. Inspect available disk space, pending review items, provider connection status, and quota cooldowns. Do not reset durable move or send journals to force retries of uncertain operations.
 
+The deployment helper discards its temporary `restore-check` copy after restore verification succeeds. Failed verification copies remain available for investigation. Actual state backups and previous source projects are retained; keep them private and review their retention separately.
+
 Revoke unused application grants and app passwords. Review local retention of Agy state and private backups. See [deployment and rollback](DEPLOYMENT.md) and [cache recovery](MAIL-EXPERIENCE-IMPLEMENTATION.md).

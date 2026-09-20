@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, writeFile, readFile, mkdir, stat, rm} from 'node:fs/promises';
+import {mkdtemp, writeFile, readFile, mkdir, stat, rm, readdir, symlink, link} from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -126,6 +126,52 @@ test('isolated restore exercises additive migration and rollback reads without l
   assert.doesNotMatch(result.stdout + result.stderr, /PRIVATE_RESTORE|fixture@example/);
   for (const [name, expected] of Object.entries(manifest.files)) assert.equal(createHash('sha256').update(await readFile(path.join(backup, name))).digest('hex'), expected);
 });
+
+test('discarding a verified restore copy preserves the actual backup and live state', async t => {
+  const {state, backup, restore} = await fixture(t), notifications = await createNotificationStore(state);
+  notifications.put('cursors', 'fixture-account', {afterUid: 88}); notifications.close();
+  const manifest = backupState(state, backup), manifestBefore = await readFile(path.join(backup, 'backup-manifest.json'));
+  const stateBefore = await Promise.all(Object.keys(manifest.files).map(name => readFile(path.join(state, name))));
+  const verified = restoreState(backup, restore);
+  assert.equal(verified.status, 0, verified.stderr);
+  const result = py('d.discard_verified_restore_copy(pathlib.Path(sys.argv[2]))', [restore]);
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(stat(restore), {code: 'ENOENT'});
+  assert.deepEqual(await readFile(path.join(backup, 'backup-manifest.json')), manifestBefore);
+  for (const [name, expected] of Object.entries(manifest.files)) assert.equal(createHash('sha256').update(await readFile(path.join(backup, name))).digest('hex'), expected);
+  assert.deepEqual(await Promise.all(Object.keys(manifest.files).map(name => readFile(path.join(state, name)))), stateBefore);
+});
+
+for (const shape of ['unmarked', 'altered-marker', 'unexpected-file', 'unexpected-directory', 'linked-directory', 'hard-linked-file', 'wrong-name']) {
+  test(`restore copy cleanup refuses ${shape} without deleting any entries`, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mailharbor-discard-'));
+    t.after(() => rm(root, {recursive: true, force: true}));
+    const restore = path.join(root, shape === 'wrong-name' ? 'state' : 'restore-check');
+    await mkdir(restore);
+    for (const name of ['accounts.key', 'accounts.enc', 'mail-index.sqlite']) await writeFile(path.join(restore, name), 'synthetic restore fixture');
+    await writeFile(path.join(restore, '.restore-check'), 'MailHarbor isolated restore verification\n');
+    if (shape === 'unmarked') await rm(path.join(restore, '.restore-check'));
+    if (shape === 'altered-marker') await writeFile(path.join(restore, '.restore-check'), 'different purpose\n');
+    if (shape === 'unexpected-file') await writeFile(path.join(restore, 'unexpected.txt'), 'must remain');
+    if (shape === 'unexpected-directory') await mkdir(path.join(restore, 'unexpected'));
+    if (shape === 'linked-directory') {
+      const outside = path.join(root, 'outside'); await mkdir(outside); await writeFile(path.join(outside, 'protected.txt'), 'must remain');
+      await rm(path.join(restore, 'accounts.enc'));
+      await symlink(outside, path.join(restore, 'accounts.enc'), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    if (shape === 'hard-linked-file') {
+      const outside = path.join(root, 'protected.txt'); await writeFile(outside, 'must remain');
+      await rm(path.join(restore, 'accounts.enc')); await link(outside, path.join(restore, 'accounts.enc'));
+    }
+    const before = (await readdir(restore)).sort(), keyBefore = await readFile(path.join(restore, 'accounts.key'));
+    const result = py('d.discard_verified_restore_copy(pathlib.Path(sys.argv[2]))', [restore]);
+    assert.notEqual(result.status, 0);
+    assert.deepEqual((await readdir(restore)).sort(), before);
+    assert.deepEqual(await readFile(path.join(restore, 'accounts.key')), keyBefore);
+    if (shape === 'linked-directory') assert.equal(await readFile(path.join(root, 'outside', 'protected.txt'), 'utf8'), 'must remain');
+    if (shape === 'hard-linked-file') assert.equal(await readFile(path.join(root, 'protected.txt'), 'utf8'), 'must remain');
+  });
+}
 
 test('notification backup folds committed WAL into a private standalone snapshot and restores pending deliveries', async t => {
   const {state, backup, restore} = await fixture(t), notifications = await createNotificationStore(state);
