@@ -1,0 +1,51 @@
+.mail-processing { margin-top: 24px; min-width: 0; }
+.processing-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+.processing-heading h2 { margin: 0; }
+.processing-state { display: inline-block; border-radius: 20px; padding: 6px 11px; font-size: .78rem; background: #f0e9d9; color: #7c6230; }
+.processing-state.enabled { background: #e7eee2; color: var(--green); }
+.processing-progress { padding: 14px 16px; margin: 18px 0 8px; border-radius: 9px; background: #ebefe4; line-height: 1.6; }
+.processing-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 10px; margin: 20px 0; }
+.processing-counts > div { min-width: 0; padding: 12px 14px; background: #f2f5f0; border-radius: 9px; }
+.processing-counts dt { color: var(--muted); font-size: .8rem; }
+.processing-counts dd { margin: 6px 0 0; font-size: 1.35rem; font-weight: 600; overflow-wrap: anywhere; }
+.processing-preview { border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 20px 0; }
+.processing-preview h3 { font-size: 1rem; }
+.processing-reasons { font-size: .84rem; }
+.processing-reasons > div { display: flex; justify-content: space-between; gap: 18px; padding: 5px 0; }
+.processing-reasons dd { margin: 0; font-weight: 600; }
+.processing-diagnostics { font-size: .84rem; line-height: 1.6; overflow-wrap: anywhere; }
+.processing-review { border-top: 1px solid var(--line); margin-top: 22px; padding-top: 16px; }
+.processing-review h3 { font-size: 1rem; }
+.processing-review-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.processing-review-filters [aria-pressed="true"] { background: var(--green); color: white; }
+.processing-review-card { border: 1px solid var(--line); border-radius: 9px; padding: 16px; margin: 12px 0; overflow-wrap: anywhere; }
+.processing-review-card h4 { margin: 0 0 8px; font-size: .94rem; }
+.processing-review-reasons { padding-left: 20px; font-size: .86rem; line-height: 1.6; }
+.processing-message-body { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84rem; line-height: 1.6; max-height: 400px; overflow-y: auto; padding: 12px; background: #f2f5f0; }
+.processing-confirmation fieldset { border: 1px solid var(--line); display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.processing-confirmation fieldset label { display: flex; gap: 8px; align-items: center; font-size: .84rem; }
+.processing-confirmation input[type="checkbox"] { width: auto; }
+.processing-date-field { display: grid; gap: 5px; margin: 12px 0; font-size: .84rem; }
+.processing-date-field input { min-width: 0; width: 100%; }
+.processing-policies { border-top: 1px solid var(--line); margin-top: 22px; padding-top: 5px; }
+.processing-policies > summary { color: var(--green); font-weight: 600; }
+.processing-policy-list { margin: 16px 0; }
+.processing-policy { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(0, 2fr); gap: 12px; border-bottom: 1px solid var(--line); padding: 13px 0; }
+.processing-policy dt { font-weight: 600; font-size: .86rem; }
+.processing-policy dd { margin: 0; display: flex; gap: 8px 12px; align-items: flex-start; flex-wrap: wrap; font-size: .84rem; line-height: 1.6; }
+.processing-policy dd > span:last-child { flex: 1 1 210px; }
+.processing-policy-action { display: inline-block; min-width: 94px; font-size: .75rem; color: var(--green); }
+.processing-policy-action.trash { color: #855f39; }
+.mail-appointment { padding: 16px; margin: 18px 0; background: #edf2e9; border: 1px solid var(--line); border-radius: 9px; }
+.mail-appointment h3 { margin: 0 0 8px; font-size: .98rem; }
+.mail-appointment p { margin: 5px 0; font-size: .84rem; line-height: 1.6; overflow-wrap: anywhere; }
+.mail-calendar-link { display: inline-flex; align-items: center; min-height: 44px; margin-top: 9px; color: var(--green); font-size: .86rem; font-weight: 600; }
+@media (max-width: 600px) {
+  .processing-actions { display: flex; flex-direction: column; align-items: stretch; }
+  .processing-actions button { flex: none; width: 100%; min-height: 46px; }
+  .processing-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .processing-policy { grid-template-columns: 1fr; gap: 5px; }
+  .processing-policy dd { display: block; }
+  .processing-policy-action { margin-right: 8px; min-width: auto; }
+  .processing-preview { padding: 14px; }
+}

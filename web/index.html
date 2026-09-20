@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#184a46">
+  <meta name="description" content="All your inboxes in one private place, with cleanup you control.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>MailHarbor</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/processing.css">
+  <link rel="stylesheet" href="/compose.css">
+  <link rel="stylesheet" href="/mail-content.css">
+  <link rel="stylesheet" href="/mail-tools.css">
+  <link rel="stylesheet" href="/mail-attachments.css">
+  <link rel="stylesheet" href="/controls.css">
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <main id="main">
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="login" class="login panel" hidden aria-labelledby="login-title">
+      <p class="eyebrow">PRIVATE HOMESERVER</p><h1 id="login-title">Welcome aboard.</h1>
+      <p>Open MailHarbor while connected to your Tailscale network. If this device needs pairing, enter your MailHarbor pairing token below.</p>
+      <form id="login-form"><label class="field"><span>Pairing token</span><input id="pairing-token" type="password" autocomplete="off" required spellcheck="false"></label><button class="primary" type="submit">Pair this device</button></form>
+      <button id="retry-tailscale" class="subtle">Try Tailscale connection again</button>
+      <p class="fineprint">The token is used to create a secure browser session. It is never saved in browser storage.</p>
+    </section>
+    <div id="authenticated" hidden>
+      <div class="mail-control-panel">
+        <form id="mail-search-form" class="mail-toolbar global-mail-toolbar" role="search" aria-label="Search mail">
+          <nav class="mail-search-navigation" aria-label="Main navigation">
+            <a href="#inbox" id="nav-inbox" aria-label="Inbox" title="Inbox" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h6l2 2h10v11H3z M5 7V4h6l2 2h6v3"/></svg></a>
+            <a href="#today" id="nav-today" aria-label="AI briefings" title="AI briefings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4z M20 2v4 M18 4h4"/></svg></a>
+            <a href="#accounts" id="nav-accounts" aria-label="Account settings" title="Account settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 3-.6 2.3-2 .9-2.1-.7-2 3.5L4 10.7v2.6L2.3 15l2 3.5 2.1-.7 2 .9L9 21h6l.6-2.3 2-.9 2.1.7 2-3.5-1.7-1.7v-2.6L21.7 9l-2-3.5-2.1.7-2-.9L15 3z"/><circle cx="12" cy="12" r="3"/></svg></a>
+          </nav>
+          <button id="mail-menu" class="subtle mail-menu" type="button" aria-label="Open folders and labels" aria-controls="mail-drawer" aria-expanded="false" title="Folders and labels"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+          <label class="mail-search-field"><span class="sr-only">Search sender, recipient or subject</span><input id="mail-search" type="search" maxlength="200" placeholder="Search mail" autocomplete="off"></label>
+          <button id="mail-search-submit" type="submit" class="subtle" aria-label="Search mail" title="Search mail"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="sr-only">Search</span></button>
+          <button id="mail-advanced" class="subtle" type="button" aria-label="Advanced search" aria-expanded="false" aria-controls="mail-advanced-search" title="Advanced search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 6h7m4 0h5M4 12h2m4 0h10M4 18h10m4 0h2"/><circle cx="13" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="18" r="2"/></svg></button>
+          <button id="mail-refresh" class="subtle" type="button" aria-label="Refresh mail" title="Refresh mail">↻</button>
+          <button id="mail-compose" class="primary mail-compose-action" type="button" aria-label="Compose a new message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z"/></svg><span>Compose</span></button>
+        </form>
+      </div>
+      <section id="mail-page" class="mail-page" aria-labelledby="mail-title">
+        <h1 id="mail-title" class="sr-only">Inbox</h1>
+        <div class="mail-workspace">
+          <aside class="mail-sidebar" aria-label="Mailbox folders">
+            <div class="mail-sidebar-heading"><span class="eyebrow">YOUR FOLDERS</span><span id="mail-connected" class="mail-connected"></span></div>
+            <div class="mail-workspace-account-container">
+              <label class="mail-account-field">
+                <span class="sr-only">Filter by account</span>
+                <select id="mail-workspace-account" aria-label="Filter by account">
+                  <option value="">All accounts</option>
+                </select>
+              </label>
+            </div>
+            <nav id="mail-folders" class="mail-folders" aria-label="Unified folders"></nav>
+            <p class="mail-sidebar-note">Folders and labels across your accounts.</p>
+          </aside>
+          <div class="mail-main">
+            <div id="mail-notice" class="mail-notice" role="status" aria-live="polite" hidden></div>
+            <div class="mail-panes"><section id="mail-list-pane" class="mail-list-pane" aria-labelledby="mail-folder-title"><div class="mail-list-heading"><div id="mail-folder-selection"></div><h2 id="mail-folder-title">Inbox</h2><span id="mail-list-count" class="mail-list-count" role="status" aria-live="polite"></span></div><div id="mail-tools" class="mail-tools"></div><div id="mail-search-summary" class="mail-search-summary" hidden></div><div id="mail-list" class="mail-list"></div><div class="mail-pagination"><button id="mail-more" class="subtle" type="button" hidden>Load more</button></div></section><section id="mail-reader" class="mail-reader" aria-label="Message reader" tabindex="-1"><div id="mail-reader-content"></div></section></div>
+          </div>
+        </div>
+        <dialog id="mail-drawer" class="mail-drawer" aria-labelledby="mail-drawer-title">
+          <div class="mail-drawer-heading"><h2 id="mail-drawer-title">Folders &amp; labels</h2><button id="mail-drawer-close" class="subtle" type="button" aria-label="Close folders and labels">✕</button></div>
+          <p id="mail-drawer-connected" class="mail-connected"></p>
+          <div class="mail-drawer-account">
+            <label class="mail-account-field">
+              <span class="sr-only">Filter by account</span>
+              <select id="mail-drawer-account" aria-label="Filter by account">
+                <option value="">All accounts</option>
+              </select>
+            </label>
+          </div>
+          <nav id="mail-drawer-folders" class="mail-folders" aria-label="Unified folders and labels"></nav>
+        </dialog>
+        <dialog id="mail-label-dialog" class="mail-label-dialog" aria-labelledby="mail-label-title"><div class="mail-label-dialog-heading"><div><h2 id="mail-label-title">Labels</h2><p>Organize this message across your accounts.</p></div><button id="mail-label-close" class="subtle" type="button" aria-label="Close labels" title="Close labels">✕</button></div><div id="mail-label-options" class="mail-label-options" role="group" aria-label="MailHarbor labels"></div><p id="mail-label-status" class="fineprint" role="status" aria-live="polite"></p></dialog>
+      </section>
+      <section id="today-page" hidden aria-labelledby="today-title">
+        <div class="page-heading"><div><p id="today-date" class="eyebrow">YOUR INBOXES, TOGETHER</p><h1 id="today-title">A little clarity for today.</h1><p class="lede">Hear what matters. Choose what leaves your inbox.</p></div><div class="heading-actions"><button id="cancel-briefing" class="subtle" hidden>Cancel briefing</button><button id="create-briefing" class="primary">Create briefing <span aria-hidden="true">↗</span></button></div></div>
+        <div class="account-strip"><div class="strip-heading"><span id="account-count" class="status-pill">0 accounts connected</span><span class="fineprint">Include in next briefing</span></div><fieldset id="account-choices"><legend class="sr-only">Accounts to include</legend></fieldset><a id="connect-first" href="#accounts" hidden>Connect an account to get started →</a></div>
+        <div class="workspace">
+          <aside class="briefing panel" aria-labelledby="briefing-title">
+            <div class="section-top"><span class="eyebrow">YOUR BRIEFING</span><span id="briefing-state" class="small-badge">READY WHEN YOU ARE</span></div>
+            <h2 id="briefing-title">The day, distilled.</h2>
+            <p id="briefing-time" class="fineprint"></p>
+            <div id="briefing-text" class="briefing-text">Create a briefing to bring the newest unread emails from your inboxes into one place.</div>
+            <div class="audio" aria-label="Read aloud">
+              <div class="audio-actions"><button id="play" class="primary" disabled>▶ Listen</button><button id="pause" class="subtle" disabled>Pause</button><button id="stop" class="subtle" disabled>Stop</button></div>
+              <p id="speech-status" class="fineprint" role="status">Read aloud uses the voices available on this device.</p>
+              <label class="field"><span>Voice</span><select id="voice" aria-label="Reading voice"></select></label>
+              <label class="field"><span class="speed-label">Reading speed <output id="speed-value" for="speed">1×</output></span><input id="speed" type="range" min="0.7" max="1.5" step="0.1" value="1"></label>
+            </div>
+            <details class="history"><summary>Recent briefings</summary><div id="history-list" class="history-list"><p class="fineprint">Your completed briefings appear here.</p></div></details>
+          </aside>
+          <section class="review" aria-labelledby="review-title">
+            <div class="review-heading"><h2 id="review-title">A considered inbox.</h2><span id="email-count" class="count">0 emails</span></div>
+            <p id="scope" class="scope">Each briefing covers up to 40 newest unread Inbox emails across your selected accounts. It is a batch, not a summary of your entire inbox.</p>
+            <p id="progress" class="progress" role="status" aria-live="polite" hidden></p>
+            <div class="review-actions"><span id="selected-count">0 selected</span><button id="clear-selection" class="subtle" disabled>Clear</button><button id="mark-read" class="subtle" disabled>Mark read</button><button id="archive" class="primary" disabled>Archive</button></div>
+            <div id="emails" class="emails"><div class="empty"><span class="empty-symbol" aria-hidden="true">✦</span><h3>Room for a clearer view.</h3><p>Your first briefing will appear here. Reading a briefing does not change your mail.</p></div></div>
+          </section>
+        </div>
+      </section>
+      <section id="accounts-page" hidden aria-labelledby="accounts-title">
+        <h1 id="accounts-title" class="sr-only">Settings</h1>
+        <div class="account-app-status"><button id="refresh-accounts" class="subtle">Refresh connections</button><span id="connection" class="connection" role="status">Connecting…</span><button id="install" class="subtle install" hidden>Install app</button></div>
+        <section class="panel mail-preferences" aria-labelledby="mail-preferences-title">
+          <h2 id="mail-preferences-title">Mailbox settings</h2>
+          <label class="mail-account-setting"><span>Show mail from</span><select id="mail-account" aria-label="Filter by account"><option value="">All accounts</option></select></label>
+          <label class="mail-account-setting">
+            <span>Display density</span>
+            <select id="mail-density-setting" aria-label="Display density">
+              <option value="default">Default</option>
+              <option value="compact">Compact</option>
+            </select>
+          </label>
+          <label class="mail-account-setting">
+            <span>Reading mode</span>
+            <select id="mail-reading-mode-setting" aria-label="Reading mode">
+              <option value="split">Split pane (side by side)</option>
+              <option value="full">Full width (single message)</option>
+            </select>
+          </label>
+          <label class="mail-account-setting">
+            <span>Mark as read</span>
+            <select id="mail-mark-read-setting" aria-label="Mark as read">
+              <option value="0">Off (manual only)</option>
+              <option value="3000">After 3 seconds</option>
+              <option value="5000">After 5 seconds</option>
+            </select>
+          </label>
+          <div id="mail-tools-settings"></div>
+        </section>
+        <section id="account-setup" class="panel provider-form" aria-label="Add an email account"></section>
+        <div id="accounts-list" class="accounts-grid"></div>
+        <section id="invoice-filing" class="panel invoice-filing" aria-label="Invoice filing"></section>
+        <section id="mail-processing" class="panel" aria-label="Mail organization and retention"></section>
+        <details id="provider-settings" class="provider-settings panel"><summary><span>Provider registration</span><span class="fineprint">Advanced · set up Google and Microsoft sign-in</span></summary><p>Register MailHarbor as your own application, then connect each mailbox with fresh consent. Existing Thunderbird credentials are not used.</p><div id="provider-list"></div></details>
+      </section>
+      <footer><span>MailHarbor <span id="version"></span></span><span>Private access through Tailscale · Cleanup you control</span></footer>
+    </div>
+  </main>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><div class="dialog-heading"><p class="eyebrow">REVIEW BEFORE APPLYING</p><h2 id="confirm-title">Confirm action</h2></div><p id="confirm-description"></p><ul id="confirm-items" class="confirm-items"></ul><p id="confirm-note" class="fineprint"></p><div class="dialog-actions"><button value="cancel" class="subtle">Go back</button><button id="confirm-apply" value="confirm" class="primary">Confirm</button></div></form></dialog>
+</body>
+</html>

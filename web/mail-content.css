@@ -1,0 +1,72 @@
+.rich-mail-content{min-width:0;margin-top:.25rem}
+.rich-mail-toolbar{display:flex;justify-content:flex-end;min-height:2rem;margin:0 0 .35rem}
+.rich-mail-controls{display:flex;flex-wrap:wrap;gap:.5rem;margin:.75rem 0}
+.rich-mail-options{position:relative}
+.rich-mail-options summary{display:flex;align-items:center;justify-content:center;list-style:none;width:2rem;height:2rem;border-radius:7px;color:var(--muted,#60746c);cursor:pointer}
+.rich-mail-options summary::-webkit-details-marker{display:none}
+.rich-mail-options summary:hover,.rich-mail-options[open] summary{background:var(--accent-soft,#e7eee7);color:var(--accent,#43705b)}
+.rich-mail-options summary:focus-visible,.rich-mail-options-list button:focus-visible{outline:2px solid var(--accent,#43705b);outline-offset:2px}
+.rich-mail-options svg{width:1.15rem;height:1.15rem;flex:none}
+.rich-mail-options-list{position:absolute;right:0;top:calc(100% + .3rem);z-index:12;display:grid;gap:.2rem;width:max-content;max-width:min(19rem,75vw);padding:.4rem;background:var(--surface,#fffefa);border:1px solid var(--border,#d6dbd7);border-radius:10px;box-shadow:0 10px 30px #193c3026}
+.rich-mail-options-list button{display:flex;align-items:center;gap:.65rem;width:100%;margin:0;border:0;border-radius:6px;background:transparent;padding:.6rem .7rem;text-align:left;font-size:.83rem;font-weight:500;line-height:1.35}
+.rich-mail-options-list button:hover:not(:disabled){background:var(--accent-soft,#e7eee7)}
+.rich-mail-options .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.rich-mail-frame{display:block;width:100%;height:180px;min-height:0;border:0;background:white;color:black;overflow-x:hidden}
+.rich-mail-text,.rich-mail-preview pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.65;max-width:100%}
+.rich-mail-text{margin:.5rem 0 1rem}
+.rich-mail-text pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0;line-height:inherit}
+.rich-mail-text details.mail-quoted-text{margin:.5rem 0}
+.rich-mail-text details.mail-quoted-text>summary{cursor:pointer;color:var(--muted,#60746c);font-size:.85rem;user-select:none}
+.rich-mail-text details.mail-quoted-text>summary:hover{color:var(--accent,#43705b)}
+.rich-mail-text details.mail-quoted-text[open]>summary{margin-bottom:.35rem}
+.rich-mail-text a{color:var(--accent,#43705b);text-decoration:underline;text-underline-offset:2px}
+.rich-mail-privacy{display:flex;align-items:center;gap:7px;margin:0 0 .5rem;padding:7px 11px;background:#f0f4f1;border:1px solid #dce4dd;border-radius:6px;color:var(--muted,#576c63);font-size:.74rem;line-height:1.45}
+.rich-mail-decrypt{display:grid;gap:.8rem;padding:1rem;border:1px solid var(--border,#d6dbd7);border-radius:8px}
+.rich-mail-decrypt label{display:grid;gap:.3rem;font-size:.85rem}
+.rich-mail-decrypt textarea{min-height:110px;resize:vertical;font:12px monospace}
+.rich-mail-decrypt input,.rich-mail-decrypt textarea{width:100%;box-sizing:border-box}
+.rich-mail-error{color:var(--danger,#a32c30)}
+
+/* Applied only inside the script-free email document. Vetted presentation styles preserved. */
+html.mail-document{overflow-x:hidden;overflow-y:auto;background:#fff;color:#25352f;font:15px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.mail-document body{display:flow-root;min-width:0;margin:0;padding:0;overflow-wrap:anywhere}
+.mail-document *{box-sizing:border-box;max-width:100%}
+.mail-document img{height:auto;max-width:100%;vertical-align:middle}
+.mail-document img[data-blocked-image],
+.mail-document img:not([src]){
+  display:inline-block;
+  min-width:48px;
+  min-height:26px;
+  padding:4px 8px;
+  margin:2px 0;
+  border:1px dashed #b5c4ba;
+  border-radius:4px;
+  background:#f3f6f3;
+  color:#4c6258;
+  font-size:.78rem;
+  font-style:italic;
+  line-height:1.4;
+  max-width:100%;
+  vertical-align:middle;
+  box-sizing:border-box;
+}
+.mail-document img[data-blocked-image="missing"]{
+  border-color:#d8c4ba;
+  background:#fdf6f2;
+  color:#785a4c;
+}
+.mail-document img:not([src])::after,
+.mail-document img[data-blocked-image]::after{
+  content:"🖼 [" attr(alt) "]";
+}
+.mail-document table{width:auto;max-width:100%;border-collapse:collapse}
+.mail-document td,.mail-document th{overflow-wrap:anywhere}
+.mail-document pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.mail-document a{color:#1764ad;text-decoration:underline;text-underline-offset:2px}
+.mail-document blockquote{margin:1rem 0;padding-left:1rem;border-left:3px solid #dbe3df}
+.mail-document details.mail-quoted-text{margin:.75rem 0}
+.mail-document details.mail-quoted-text>summary{cursor:pointer;color:#4c6258;font-size:.85rem;user-select:none}
+.mail-document details.mail-quoted-text>summary:hover{color:#1764ad}
+.mail-document details.mail-quoted-text[open]>summary{margin-bottom:.5rem}
+.mail-document h1,.mail-document h2,.mail-document h3{line-height:1.25}
+.mail-document h1{font-size:1.7rem}.mail-document h2{font-size:1.4rem}.mail-document h3{font-size:1.15rem}
