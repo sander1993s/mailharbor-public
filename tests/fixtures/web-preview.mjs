@@ -13,6 +13,41 @@ import { createComposeRecovery, sanitizeComposeHtml, recoveryDigest } from '../.
 const port = Number(process.env.MAILHARBOR_PREVIEW_PORT || 18765);
 const origin = `http://127.0.0.1:${port}`;
 const token = 'synthetic-preview-pairing-token-only';
+const previewAgyLogin = process.env.MAILHARBOR_PREVIEW_AGY_LOGIN === '1';
+let fixtureAgyConnected = !previewAgyLogin, fixtureAgyAttempt = null;
+// Session-owned synthetic states only. No subprocess, provider request, or real credentials.
+const fixtureAgyLogin = {
+  status(owner) {
+    if (!fixtureAgyAttempt || fixtureAgyAttempt.owner !== owner) return { state: 'idle' };
+    const { owner: ignored, ...value } = fixtureAgyAttempt;
+    return structuredClone(value);
+  },
+  start(owner) {
+    if (!owner) throw new MailHarborError('unauthorized');
+    if (fixtureAgyAttempt?.state === 'awaiting_code') {
+      if (fixtureAgyAttempt.owner !== owner) throw new MailHarborError('busy');
+      return this.status(owner);
+    }
+    fixtureAgyAttempt = {
+      owner, state: 'awaiting_code', expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      url: 'https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=synthetic-preview.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Flocalhost%2Fsynthetic-preview&state=synthetic-preview-only'
+    };
+    return this.status(owner);
+  },
+  submitCode(owner, code) {
+    if (!fixtureAgyAttempt || fixtureAgyAttempt.owner !== owner) throw new MailHarborError('not_found');
+    if (fixtureAgyAttempt.state !== 'awaiting_code' || typeof code !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._~+/=\-]{7,2047}$/.test(code)) throw new MailHarborError('invalid_request');
+    fixtureAgyConnected = true;
+    fixtureAgyAttempt = { owner, state: 'connected' };
+    return this.status(owner);
+  },
+  cancel(owner) {
+    if (!fixtureAgyAttempt || fixtureAgyAttempt.owner !== owner) throw new MailHarborError('not_found');
+    fixtureAgyAttempt = { owner, state: 'cancelled' };
+    return this.status(owner);
+  },
+  close() { fixtureAgyAttempt = null; }
+};
 
 let stored = {
   schema: 1,
@@ -1062,12 +1097,15 @@ const factory = createWebFactory({ origin, stateDir: '/unused-synthetic-store', 
 });
 
 const server = createServer({ pairingToken: token }, async () => { throw new Error('AI must never run in this fixture'); }, {
+  agyLogin: fixtureAgyLogin,
   createWeb(context) {
     return factory({
       ...context,
       jobs: {
         ...context.jobs,
-        status: async () => ({ ready: true, version: VERSION, detail: 'Synthetic UI preview' })
+        status: async () => fixtureAgyConnected
+          ? { ready: true, version: VERSION, detail: 'Synthetic UI preview' }
+          : { ready: false, code: 'login_required', version: VERSION, detail: 'Synthetic preview: reconnect AI through Settings.' }
       }
     });
   }

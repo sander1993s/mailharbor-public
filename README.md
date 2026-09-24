@@ -36,7 +36,7 @@ Requirements:
 - Linux with a non-root service account and a user systemd session.
 - Tailscale on the server and client devices for the documented private deployment.
 - A supported Agy installation and Google authorization for AI features. Agy's Linux login may require an unlocked Secret Service keyring and a working D-Bus session.
-- Python 3 for packaging and deployment helpers. Thunderbird 140 or later is needed only for the optional add-on.
+- Python 3 at `/usr/bin/python3` for browser-based AI reconnect, plus packaging and deployment helpers. Thunderbird 140 or later is needed only for the optional add-on.
 
 From a checkout under the service account:
 
@@ -71,6 +71,12 @@ Add this `web` section to `~/.config/mailharbor/config.json`, preserving the gen
 Restart MailHarbor, open that origin, and sign in with the token in `~/.config/mailharbor/pairing-token`. Optionally populate `allowedTailscaleLogins` with your own permitted owner identities. Use the HTTPS certificate hostname consistently. Do not expose the loopback service directly or use Tailscale Funnel for this deployment.
 
 Tailscale sign-in trusts the local proxy boundary and local host processes. All accepted identities access the same owner's data; tailnet membership alone does not grant application access. See [deployment and rollback](docs/DEPLOYMENT.md).
+
+## Reconnect AI from the browser or app
+
+Open **Settings → AI connection → Reconnect AI**. When prompted, choose **Continue with Google**, sign in with the Google account used for Agy, then return to MailHarbor and paste the authorization code. Wait for **AI sign-in verified**. Opening Settings or checking connection status does not contact Google; starting sign-in sends no email content or AI prompt.
+
+Verified sign-in clears the queue's authentication pause. Create a new briefing to retry one that already failed; reconnect does not replay failed jobs or clear quota and configuration failures. The Linux service account still needs access to its unlocked Secret Service/D-Bus keyring. If browser reconnect is unavailable, run `node scripts/login.mjs` interactively as that same service account, then use **Reconnect AI** to verify the saved login and release the authentication pause.
 
 ## Optional Thunderbird add-on
 

@@ -10,6 +10,14 @@ The Node service binds `127.0.0.1:8765`. Expose it with Tailscale Serve at your 
 
 Register OAuth callbacks using this exact origin and the paths `/oauth/google/callback`, `/oauth/microsoft/callback`, and, if needed, `/oauth/drive/callback`. Add your own accounts through the app; provider credentials are not imported from Thunderbird.
 
+## Reconnect Agy
+
+In the browser or installed app, open **Settings → AI connection → Reconnect AI**, follow **Continue with Google**, and paste Google's authorization code back into MailHarbor. A fresh Agy process checks the saved login before the app reports success. The reconnect attempt belongs to the browser session that started it; sign-out or expiry cancels that session's attempt. Opening Settings and reading status do not start Agy or contact Google.
+
+Install Python 3 at `/usr/bin/python3`; the service uses `scripts/agy-login-pty.py` as a private terminal for Agy's remote authorization flow. Login runs under the existing service account and dedicated Agy profile, with access to that account's unlocked Secret Service keyring and D-Bus session. Browser reconnect cannot unlock the keyring. The interactive fallback remains `node scripts/login.mjs`, run as the same service account; afterward, use **Reconnect AI** to verify the saved login.
+
+Successful verification clears only the shared queue's authentication pause. Failed briefings require a fresh submission, and quota cooldowns and configuration failures remain in effect. Sign-in sends no email content or model prompt. Browser reconnect has synthetic test coverage; a real Google authorization round trip still needs verification on the deployment.
+
 ## Verify your installation
 
 Run synthetic tests before installation. After installing, check service readiness, keyring access after restart, HTTPS sign-in, one configured mailbox's folder listing, and sign-out. Review provider requirements in [MOBILE-SETUP.md](MOBILE-SETUP.md).

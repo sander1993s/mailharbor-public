@@ -166,6 +166,16 @@ export function createJobs(config, runner = runAgy, { classificationRunner = run
       abort(job); job.result = undefined; job.error = undefined; job.status = 'cancelled';
       return { id: job.id, status: 'cancelled' };
     },
+    async resumeAfterLogin() {
+      assertOpen();
+      await validateProfile(config);
+      const quota = await cooldown.status();
+      assertOpen();
+      // A verified sign-in only releases authentication failures. Failed jobs
+      // keep their outcome and require an explicit fresh submission.
+      if (pausedCode === 'login_required') pausedCode = null;
+      return { resumed: !pausedCode && !quota.blocked };
+    },
     async status() {
       assertOpen();
       const quota = await cooldown.status();

@@ -1,5 +1,5 @@
 export const MODEL = 'gemini-3.8-flash-high';
-export const VERSION = '0.8.6';
+export const VERSION = '0.8.7';
 export const MAX_REQUEST_BYTES = 512 * 1024;
 
 // Only these fixed values may cross the API/persistence boundary. Provider text,
@@ -38,7 +38,10 @@ export const errorMessages = Object.freeze({
   unauthorized: 'A valid pairing token is required.',
   invalid_request: 'The request does not match the MailHarbor format or limits.',
   busy: 'The queue is full. Try again after existing jobs finish.',
-  login_required: 'Sign in to Agy interactively under the dedicated service account.',
+  login_required: 'Your AI connection needs a fresh sign-in. Open Settings → AI connection to reconnect.',
+  login_failed: 'AI sign-in could not be verified. Try reconnecting again. If it keeps failing, check the homeserver’s Agy installation and unlocked sign-in keyring.',
+  login_expired: 'This sign-in attempt expired. Start reconnecting again to get a new Google sign-in link.',
+  login_unavailable: 'Browser sign-in requires a Linux homeserver with Python 3 at /usr/bin/python3 and an unlocked Agy sign-in keyring. Check the server setup or use scripts/login.mjs.',
   quota_exhausted: 'Agy reported a quota or request-rate limit. Processing will wait until the displayed retry time; the cooldown persists across restart.',
   timeout: 'The classification timed out. No automatic retry was made.',
   invalid_model_output: 'The model did not return a complete, safe classification. No mailbox action was authorized.',

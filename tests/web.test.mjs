@@ -81,6 +81,7 @@ async function harness(t, options = {}) {
   const factory = createWebFactory({ origin, stateDir: '/unused-with-injected-store', ...options.config }, { store, mailboxes, reader: options.reader, fetcher: options.fetcher, drive: options.drive, invoices: options.invoices, processing: options.processing,
     composer: options.composer, content: options.content, notifications: options.notifications, labelSync: options.labelSync, labelReader: options.labelReader });
   const server = createServer({ pairingToken: token }, options.runner ?? (async input => { runs++; return result(input); }), {
+    agyLogin: options.agyLogin,
     createWeb(context) { capturedJobs = context.jobs; return factory({ ...context, jobs: options.wrapJobs ? options.wrapJobs(context.jobs) : context.jobs }); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -124,6 +125,82 @@ async function harness(t, options = {}) {
   }
   return { call, login, create, finish, store, mailboxCalls, jobs: () => capturedJobs, runs: () => runs, close: () => closeServer(server) };
 }
+
+test('Agy reconnect routes require browser authentication, CSRF and strict bounded inputs before touching login', async t => {
+  const calls = [];
+  const agyLogin = {
+    status(owner) { calls.push(['status', owner]); return { state: 'idle' }; },
+    start(owner) { calls.push(['start', owner]); return { state: 'starting' }; },
+    submitCode(owner, code) { calls.push(['code', owner, code]); return { state: 'verifying' }; },
+    cancel(owner) { calls.push(['cancel', owner]); return { state: 'cancelled' }; },
+    close() {}
+  };
+  const app = await harness(t, { agyLogin });
+  for (const [route, method, input] of [['/api/agy/login', 'GET'], ['/api/agy/login', 'POST', {}], ['/api/agy/login', 'DELETE'], ['/api/agy/login/code', 'POST', { code: 'fixture-code' }]]) {
+    assert.equal((await app.call(route, { method, input })).status, 401);
+  }
+  const session = await app.login();
+  for (const [route, method, input] of [['/api/agy/login', 'POST', {}], ['/api/agy/login', 'DELETE'], ['/api/agy/login/code', 'POST', { code: 'fixture-code' }]]) {
+    assert.equal((await app.call(route, { method, input, session, headers: { 'X-Mailharbor-CSRF': undefined } })).status, 401);
+    assert.equal((await app.call(route, { method, input, session, headers: { Origin: 'https://attacker.example' } })).status, 401);
+    assert.equal((await app.call(route, { method, input, session, headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 401);
+  }
+  for (const route of ['/api/agy/login?force=1', '/api/agy/login/code?code=private']) {
+    assert.equal((await app.call(route, { session })).status, 400);
+  }
+  for (const input of [{ command: 'agy' }, { owner: 'other' }, { args: [] }]) {
+    assert.equal((await app.call('/api/agy/login', { method: 'POST', session, input })).status, 400);
+  }
+  for (const input of [{}, { code: '' }, { code: '   ' }, { code: 1 }, { code: 'short' }, { code: 'x'.repeat(2049) }, { code: 'code\ncommand' }, { code: '/command' }, { code: 'fixture-code', owner: 'other' }]) {
+    assert.equal((await app.call('/api/agy/login/code', { method: 'POST', session, input })).status, 400);
+  }
+  assert.equal((await app.call('/api/agy/login', { method: 'DELETE', session, input: {} })).status, 400);
+  assert.deepEqual(calls, []);
+  assert.equal((await app.call('/api/agy/login', { session })).body.state, 'idle');
+  assert.equal((await app.call('/api/agy/login', { method: 'POST', session, input: {} })).status, 202);
+  assert.equal((await app.call('/api/agy/login/code', { method: 'POST', session, input: { code: 'fixture-code' } })).status, 202);
+  const cancelled = await app.call('/api/agy/login', { method: 'DELETE', session });
+  assert.equal(cancelled.status, 200); assert.equal(cancelled.headers['cache-control'], 'no-store');
+  assert.equal(cancelled.headers['referrer-policy'], 'no-referrer');
+  assert.deepEqual(calls, [['status', session.csrf], ['start', session.csrf], ['code', session.csrf, 'fixture-code'], ['cancel', session.csrf]]);
+  assert.equal(app.runs(), 0); assert.equal(app.mailboxCalls.scan, 0);
+});
+
+test('Agy login owner binding follows the browser session and logout cancels only that session', async t => {
+  const owners = [], cancelled = [];
+  let owner, closed = 0;
+  const agyLogin = {
+    start(value) { owner = value; return { state: 'awaiting_code', url: 'https://accounts.google.com/o/oauth2/v2/auth?state=FIXTURE_STATE' }; },
+    status(value) { owners.push(value); return value === owner ? { state: 'awaiting_code', url: 'https://accounts.google.com/o/oauth2/v2/auth?state=FIXTURE_STATE' } : { state: 'idle' }; },
+    submitCode(value) { owners.push(value); if (value !== owner) throw new MailHarborError('not_found', 'PRIVATE_RAW_CLI_TEXT'); return { state: 'verifying' }; },
+    cancel(value) { cancelled.push(value); if (value !== owner) throw new MailHarborError('not_found'); owner = null; return { state: 'cancelled' }; },
+    close() { closed++; }
+  };
+  const app = await harness(t, { agyLogin }), first = await app.login(), second = await app.login();
+  await app.call('/api/agy/login', { method: 'POST', session: first, input: {} });
+  assert.match((await app.call('/api/agy/login', { session: first })).body.url, /FIXTURE_STATE/);
+  assert.doesNotMatch((await app.call('/api/agy/login', { session: second })).text, /FIXTURE_STATE/);
+  const denied = await app.call('/api/agy/login/code', { method: 'POST', session: second, input: { code: 'fixture-code' } });
+  assert.equal(denied.status, 404); assert.doesNotMatch(denied.text, /PRIVATE_RAW_CLI_TEXT/);
+  assert.equal((await app.call('/api/agy/login', { method: 'DELETE', session: second })).status, 404);
+  await app.call('/api/session', { method: 'DELETE', session: second });
+  assert.equal(owner, first.csrf); assert.deepEqual(cancelled, [second.csrf, second.csrf]);
+  await app.call('/api/session', { method: 'DELETE', session: first });
+  assert.equal(owner, null); assert.deepEqual(cancelled, [second.csrf, second.csrf, first.csrf]);
+  assert.equal((await app.call('/api/agy/login', { session: first })).status, 401);
+  assert.deepEqual(owners, [first.csrf, second.csrf, second.csrf]);
+  await app.close(); await app.close(); assert.equal(closed, 1);
+});
+
+test('expired browser sessions cancel their Agy login without exposing its state', async t => {
+  const cancelled = [];
+  const app = await harness(t, { agyLogin: { cancel: owner => { cancelled.push(owner); }, close() {}, status() { throw new Error('Expired sessions must not read login state'); } } });
+  const session = await app.login(), now = Date.now();
+  t.mock.method(Date, 'now', () => now + 8 * 86400000);
+  assert.equal((await app.call('/api/agy/login', { session })).status, 401);
+  await Promise.resolve();
+  assert.deepEqual(cancelled, [session.csrf]);
+});
 
 test('label sync status is private and explicit retries require CSRF and a strict action', async t => {
   let requests = 0;

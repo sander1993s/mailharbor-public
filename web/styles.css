@@ -237,6 +237,17 @@ body:has(#authenticated:not([hidden]) #mail-page:not([hidden])) footer { display
 .mail-refreshing-bar { padding: 8px 16px; background: #eaf2e8; color: #275038; font-size: .78rem; text-align: center; border-bottom: 1px solid #d4e2d2; }
 .mail-row-refreshing { opacity: .7; }
 
+/* Browser-based AI sign-in */
+.agy-login { margin-bottom: 20px; }
+.agy-login h2 { margin-top: 0; }
+.agy-login-status { font-weight: 600; }
+.agy-login-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.agy-login-instructions { max-width: 640px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.agy-login-instructions > a { display: inline-block; padding: 8px 0; font-weight: 600; }
+.agy-login-form { margin-top: 12px; }
+.agy-login-form .field { margin-bottom: 12px; }
+.agy-login [hidden] { display: none !important; }
+
 /* Conversation thread & hidden state integrity */
 .mail-conversation-thread { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
 .mail-conversation-entry { border: 1px solid var(--line); border-radius: 8px; background: var(--paper); overflow: hidden; }

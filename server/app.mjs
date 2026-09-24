@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { runAgy } from './runner.mjs';
 import { createJobs } from './jobs.mjs';
+import { createAgyLogin } from './agy-login.mjs';
 import { MAX_REQUEST_BYTES, MailHarborError, errorMessages, safeError, validateRequest } from './validation.mjs';
 
 const statusCodes = { unauthorized: 401, invalid_request: 400, busy: 429, not_found: 404, configuration_error: 503, quota_exhausted: 503, login_required: 503 };
@@ -43,6 +44,7 @@ function send(response, status, body) {
 /** The caller must listen on 127.0.0.1. Tests may inject a pure/fake runner. */
 export function createServer(config, runner = runAgy, options = {}) {
   const jobs = createJobs(config, runner);
+  const agyLogin = options.agyLogin ?? createAgyLogin(config, { onConnected: () => jobs.resumeAfterLogin() });
   const token = loadToken(config).then(value => ({ value }), () => ({ error: true }));
   async function verifyToken(raw) {
     const expected = await token;
@@ -50,12 +52,14 @@ export function createServer(config, runner = runAgy, options = {}) {
     return typeof raw === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(raw) && timingSafeEqual(digest(raw), expected.value);
   }
   let web;
-  try { web = options.createWeb?.({ jobs, verifyToken }); }
-  catch (error) { void jobs.close(); throw error; }
+  try { web = options.createWeb?.({ jobs, verifyToken, agyLogin }); }
+  catch (error) { void jobs.close(); void Promise.resolve().then(() => agyLogin.close()).catch(() => {}); throw error; }
   let closed = false;
   let closing = null;
   let webClosing = null;
+  let loginClosing = null;
   const closeWeb = () => webClosing ??= Promise.resolve().then(() => web?.close());
+  const closeLogin = () => loginClosing ??= Promise.resolve().then(() => agyLogin.close());
 
   const server = http.createServer({ maxHeaderSize: 8192 }, async (request, response) => {
     try {
@@ -89,7 +93,7 @@ export function createServer(config, runner = runAgy, options = {}) {
   server.maxHeadersCount = 40;
   server.shutdown = () => closing ??= (async () => {
     closed = true;
-    const stopping = Promise.allSettled([closeWeb(), jobs.close()]);
+    const stopping = Promise.allSettled([closeWeb(), closeLogin(), jobs.close()]);
     await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
     const stopped = await stopping;
     const failed = stopped.find(result => result.status === 'rejected');
@@ -99,6 +103,7 @@ export function createServer(config, runner = runAgy, options = {}) {
     closed = true;
     void jobs.close().catch(() => {});
     void closeWeb().catch(() => {});
+    void closeLogin().catch(() => {});
   });
   // Refuse accidental exposure if bootstrap configuration changes.
   const listen = server.listen.bind(server);

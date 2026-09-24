@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { createJobs } from '../server/jobs.mjs';
 import { createServer, closeServer } from '../server/app.mjs';
 import { MailHarborError, MODEL, VERSION, safeError } from '../server/validation.mjs';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { SAFE_SETTINGS, SAFE_SHARED } from '../server/profile.mjs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -26,6 +28,71 @@ async function completed(jobs, id, owner) {
   }
   throw new Error('Job did not finish');
 }
+
+async function reconnectProfile(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'mailharbor-reconnect-jobs-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = { profileHome: path.join(root, 'profile'), workRoot: path.join(root, 'work'), agyPath: path.join(root, 'fake-binary'), model: MODEL, cooldownFile: path.join(root, 'cooldown.json') };
+  const cli = path.join(config.profileHome, '.gemini', 'antigravity-cli');
+  const shared = path.join(config.profileHome, '.gemini', 'config');
+  await mkdir(cli, { recursive: true }); await mkdir(shared, { recursive: true });
+  const json = (file, value) => writeFile(file, JSON.stringify(value), { mode: 0o600 });
+  await writeFile(config.agyPath, 'never-executed-synthetic-binary', { mode: 0o700 });
+  await json(path.join(config.profileHome, '.mailharbor-profile.json'), { version: 1, agySha256: createHash('sha256').update('never-executed-synthetic-binary').digest('hex') });
+  await json(path.join(cli, 'settings.json'), SAFE_SETTINGS);
+  await json(path.join(shared, 'config.json'), SAFE_SHARED);
+  await json(path.join(shared, 'mcp_config.json'), {});
+  return config;
+}
+
+test('verified sign-in releases only the authentication pause and does not replay failed jobs', async t => {
+  const config = await reconnectProfile(t);
+  let rejectFirst, runs = 0;
+  const jobs = createJobs(config, request => {
+    runs++;
+    return runs === 1 ? new Promise((_, reject) => { rejectFirst = reject; }) : result(request);
+  });
+  t.after(() => jobs.close());
+  const first = await jobs.submit(input(), 'owner');
+  for (let i = 0; !rejectFirst && i < 100; i++) await pause(5);
+  assert.ok(rejectFirst);
+  const queued = await jobs.submit(input(), 'owner');
+  rejectFirst(new MailHarborError('login_required'));
+  assert.equal((await completed(jobs, first.id, 'owner')).error.code, 'login_required');
+  assert.equal((await completed(jobs, queued.id, 'owner')).error.code, 'login_required');
+  await assert.rejects(jobs.submit(input(), 'owner'), { code: 'login_required' });
+  assert.deepEqual(await jobs.resumeAfterLogin(), { resumed: true });
+  assert.equal(runs, 1);
+  assert.equal(jobs.get(first.id, 'owner').status, 'failed');
+  assert.equal(jobs.get(queued.id, 'owner').status, 'failed');
+  assert.equal((await jobs.status()).ready, true);
+  const retry = await jobs.submit(input(), 'owner');
+  assert.equal((await completed(jobs, retry.id, 'owner')).status, 'completed');
+  assert.equal(runs, 2);
+});
+
+test('login recovery validates the pinned profile and retains configuration and quota pauses', async t => {
+  for (const code of ['configuration_error', 'quota_exhausted']) {
+    const config = await reconnectProfile(t);
+    const jobs = createJobs(config, async () => { throw new MailHarborError(code); });
+    t.after(() => jobs.close());
+    const failed = await jobs.submit(input());
+    assert.equal((await completed(jobs, failed.id)).error.code, code);
+    assert.deepEqual(await jobs.resumeAfterLogin(), { resumed: false });
+    await assert.rejects(jobs.submit(input()), { code });
+    assert.equal((await jobs.status()).code, code);
+  }
+  const invalid = await reconnectProfile(t);
+  const jobs = createJobs(invalid, async () => { throw new MailHarborError('login_required'); });
+  t.after(() => jobs.close());
+  const failed = await jobs.submit(input());
+  await completed(jobs, failed.id);
+  await writeFile(invalid.agyPath, 'changed-after-login');
+  await assert.rejects(jobs.resumeAfterLogin(), { code: 'configuration_error' });
+  await assert.rejects(jobs.submit(input()), { code: 'login_required' });
+  await jobs.close();
+  await assert.rejects(jobs.resumeAfterLogin(), { code: 'busy' });
+});
 
 test('job owners cannot inspect or cancel one another; snapshots are detached and omit input', async t => {
   const jobs = createJobs({}, async request => result(request));

@@ -46,7 +46,8 @@ const statusCodes = {
   oauth_invalid_scope: 422, oauth_invalid_grant: 422, oauth_imap_authentication_failed: 422, oauth_imap_connection_failed: 502,
   cancelled: 408, cache_unavailable: 503, telegram_not_configured: 422, telegram_configuration_error: 422,
   telegram_authentication_failed: 422, telegram_forbidden: 422, telegram_rate_limited: 429,
-  telegram_rejected: 422, telegram_unavailable: 502, telegram_cancelled: 408
+  telegram_rejected: 422, telegram_unavailable: 502, telegram_cancelled: 408,
+  login_required: 503, login_failed: 422, login_expired: 410, login_unavailable: 503
 };
 
 const files = new Map([
@@ -54,6 +55,7 @@ const files = new Map([
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/app.mjs', ['app.mjs', 'text/javascript; charset=utf-8']],
   ['/account-setup.mjs', ['account-setup.mjs', 'text/javascript; charset=utf-8']],
+  ['/agy-login.mjs', ['agy-login.mjs', 'text/javascript; charset=utf-8']],
   ['/mail.mjs', ['mail.mjs', 'text/javascript; charset=utf-8']],
   ['/mail-tools.mjs', ['mail-tools.mjs', 'text/javascript; charset=utf-8']],
   ['/telegram-settings.mjs', ['telegram-settings.mjs', 'text/javascript; charset=utf-8']],
@@ -164,7 +166,7 @@ export function createWebFactory(config, dependencies = {}) {
   if ([...allowTailnet].some(item => typeof item !== 'string' || !item || /[\r\n]/.test(item))) fail('configuration_error');
   const owner = 'mailharbor-owner';
 
-  return ({ jobs, verifyToken }) => {
+  return ({ jobs, verifyToken, agyLogin }) => {
     const sessions = new Map();
     const batches = new Map();
     const actions = new Set();
@@ -424,7 +426,10 @@ export function createWebFactory(config, dependencies = {}) {
     }
     function expire() {
       const now = Date.now();
-      for (const [id, value] of sessions) if (value.expires <= now) sessions.delete(id);
+      for (const [id, value] of sessions) if (value.expires <= now) {
+        sessions.delete(id);
+        void Promise.resolve().then(() => agyLogin?.cancel(value.csrf)).catch(() => {});
+      }
       for (const [id, value] of batches) if (now - value.created >= retention) { cancel(value); batches.delete(id); }
       for (const [id, value] of loginAttempts) if (value.until <= now) loginAttempts.delete(id);
       mail?.expire();
@@ -496,7 +501,29 @@ export function createWebFactory(config, dependencies = {}) {
           if (url.pathname === '/api/session' && request.method === 'GET') { json(response, 200, { authenticated: true, csrf: current.csrf, version: VERSION }); return true; }
           if (url.pathname === '/api/session' && request.method === 'DELETE') {
             for (const [key, value] of sessions) if (value === current) sessions.delete(key);
+            try { await agyLogin?.cancel(current.csrf); } catch {}
             json(response, 200, { authenticated: false }, { 'Set-Cookie': `${cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}` }); return true;
+          }
+          if (['/api/agy/login', '/api/agy/login/code'].includes(url.pathname)) {
+            if (url.search) fail('invalid_request');
+            if (!agyLogin) fail('login_unavailable');
+            if (url.pathname === '/api/agy/login' && request.method === 'GET') {
+              json(response, 200, await agyLogin.status(current.csrf)); return true;
+            }
+            if (url.pathname === '/api/agy/login' && request.method === 'POST') {
+              keys(await body(request), []);
+              json(response, 202, await agyLogin.start(current.csrf)); return true;
+            }
+            if (url.pathname === '/api/agy/login' && request.method === 'DELETE') {
+              if (request.headers['transfer-encoding'] || (request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0')) fail('invalid_request');
+              json(response, 200, await agyLogin.cancel(current.csrf)); return true;
+            }
+            if (url.pathname === '/api/agy/login/code' && request.method === 'POST') {
+              const input = await body(request, 16384); keys(input, ['code']);
+              if (typeof input.code !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._~+\/=\-]{7,2047}$/u.test(input.code)) fail('invalid_request');
+              json(response, 202, await agyLogin.submitCode(current.csrf, input.code)); return true;
+            }
+            fail('not_found');
           }
           if (url.pathname === '/api/status' && request.method === 'GET') { json(response, 200, await jobs.status()); return true; }
           if (url.pathname === '/api/accounts' && request.method === 'GET') { json(response, 200, { accounts: accounts.list(), providers: accounts.registrations(), catalog: accounts.catalog(), oauthFailure: current.oauthFailure }); return true; }

@@ -4,6 +4,7 @@ import {createProcessingView} from './processing.mjs';
 import {observeSelects} from './controls.mjs';
 import {createApiRequest} from './api-request.mjs';
 import {createAccountSetup} from './account-setup.mjs';
+import {createAgyLoginView} from './agy-login.mjs';
 
 observeSelects(document);
 
@@ -31,10 +32,22 @@ const timeText = value => {
 };
 const numberText = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
 const messages = () => Array.isArray(state.current?.messages) ? state.current.messages : [];
-const notify = (text, type = '') => {
+let noticeCode = '';
+const notify = (text, type = '', code = '') => {
+  noticeCode = code;
   $('notice').textContent = text;
   $('notice').className = `notice ${type}`;
   $('notice').hidden = !text;
+  if (code === 'login_required' && state.session) {
+    const link = make('a', 'Reconnect AI in Settings'); link.href = '#accounts';
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      location.hash = '#accounts'; setPage();
+      $('agy-login').scrollIntoView({behavior: 'smooth', block: 'start'});
+      $('agy-login').focus({preventScroll: true});
+    });
+    $('notice').append(make('span', ' '), link);
+  }
 };
 const ERROR_MESSAGES = {
   busy: 'The homeserver is busy. Let the current operation finish, then try again.',
@@ -46,6 +59,7 @@ const ERROR_MESSAGES = {
   invalid_grant: 'This account needs a fresh sign-in. Reconnect it in Accounts.',
   oauth_not_configured: 'Set up this provider under Accounts → Provider registration first.',
   not_configured: 'Complete the connection settings in Accounts first.',
+  login_required: 'Your AI connection needs a fresh Google sign-in.',
   stale_message: 'This email or mail view changed. Refresh mail or create a new briefing before trying again.',
   stale: 'This email changed since the briefing. Create a fresh briefing before changing it.',
   csrf: 'Your browser session changed. Reload MailHarbor and try again.',
@@ -55,10 +69,12 @@ function describeError(error) {
   if (ERROR_MESSAGES[error?.code]) return ERROR_MESSAGES[error.code];
   return error?.message || 'Something went wrong. Please try again.';
 }
+function notifyError(error) { notify(describeError(error), 'error', error?.code); }
 function showLogin() {
   mailView.reset();
   filingView.reset();
   processingView.reset();
+  agyLoginView.reset();
   state.session = false;
   state.csrf = '';
   clearTimeout(state.pollTimer);
@@ -96,13 +112,14 @@ function setPage() {
   }
   if (page === 'inbox' && state.session) mailView.show();
   else mailView.hide();
-  if (page === 'accounts' && state.session) { filingView.show(); processingView.show(); void mailView.renderSettings(outgoingSettings); }
-  else { filingView.hide(); processingView.hide(); }
+  if (page === 'accounts' && state.session) { filingView.show(); processingView.show(); agyLoginView.show(); void mailView.renderSettings(outgoingSettings); }
+  else { filingView.hide(); processingView.hide(); agyLoginView.hide(); }
   document.title = `${page === 'today' ? 'Briefings' : page === 'accounts' ? 'Accounts' : 'Inbox'} · MailHarbor`;
 }
 const mailView = createMailView({api, describeError});
 const filingView = createFilingView({root: $('invoice-filing'), api, describeError, notify});
 const processingView = createProcessingView({root: $('mail-processing'), api, describeError, notify});
+const agyLoginView = createAgyLoginView({root: $('agy-login'), api, onConnected: refreshStatus});
 async function acceptSession(session) {
   if (session?.authenticated !== true || typeof session.csrf !== 'string' || !session.csrf) throw new Error('The server did not create a valid browser session.');
   state.csrf = session.csrf;
@@ -113,7 +130,7 @@ async function acceptSession(session) {
   setPage();
   notify('');
   const results = await Promise.allSettled([refreshStatus(), refreshAccounts(), refreshJobs(true)]);
-  for (const result of results) if (result.status === 'rejected') notify(describeError(result.reason), 'error');
+  for (const result of results) if (result.status === 'rejected') notifyError(result.reason);
 }
 async function connectSession(body) {
   const buttons = [...$('login').querySelectorAll('button')];
@@ -128,8 +145,8 @@ async function initialize() {
   catch (error) {
     if (error.status === 401) {
       try { await connectSession({tailscale: true}); return; }
-      catch (fallback) { showLogin(); if (fallback.status !== 401 && fallback.status !== 403) notify(describeError(fallback), 'error'); }
-    } else { showLogin(); notify(describeError(error), 'error'); }
+      catch (fallback) { showLogin(); if (fallback.status !== 401 && fallback.status !== 403) notifyError(fallback); }
+    } else { showLogin(); notifyError(error); }
   }
 }
 async function refreshStatus() {
@@ -140,7 +157,9 @@ async function refreshStatus() {
   $('connection').className = `connection ${status.ready ? 'ready' : ''}`;
   $('connection').title = status.ready ? (status.model || 'Connected') : (status.detail || 'Complete Agy setup on the homeserver.');
   if (status.version) $('version').textContent = `v${status.version}`;
-  if (!status.ready) notify(status.detail || 'Your homeserver is connected. Complete its Agy login and setup before creating a briefing.', 'error');
+  if (!status.ready) notify(status.code === 'login_required' ? ERROR_MESSAGES.login_required : status.detail || 'Your homeserver is connected. Complete its Agy login and setup before creating a briefing.', 'error', status.code);
+  else if (noticeCode === 'login_required') notify('');
+  return status;
 }
 async function refreshAccounts() {
   const session = state.csrf;
@@ -391,7 +410,7 @@ function renderHistory() {
   const list = $('history-list'); list.replaceChildren();
   if (!state.jobs.length) { list.append(make('p', 'Your briefings will appear here. You can return on another device while the homeserver works.', 'fineprint')); return; }
   for (const job of state.jobs.slice(0, 12)) {
-    const button = addButton(list, timeText(job.createdAt) || 'Briefing', () => loadJob(job.id).catch(error => notify(describeError(error), 'error')), 'history-item');
+    const button = addButton(list, timeText(job.createdAt) || 'Briefing', () => loadJob(job.id).catch(error => notifyError(error)), 'history-item');
     if (state.current?.id === job.id) button.setAttribute('aria-current', 'true');
     button.append(make('small', `${job.status} · ${Number.isFinite(job.count) ? job.count : '…'} emails`));
   }
@@ -426,7 +445,7 @@ function schedulePoll() {
       if (state.current?.id === state.activeId) await loadJob(state.activeId, {poll: true});
       else await refreshJobs();
     } catch (error) {
-      if (state.session) { notify(describeError(error), 'error'); schedulePoll(); }
+      if (state.session) { notifyError(error); schedulePoll(); }
     }
   }, 2000);
 }
@@ -513,7 +532,7 @@ async function createBriefing() {
     await loadJob(job.id);
     if (ACTIVE.has(state.current?.status)) notify('Your homeserver is preparing the briefing. You can return here from your phone or computer.');
   } catch (error) {
-    notify(describeError(error), 'error');
+    notifyError(error);
     // An accepted POST can outlive a failed response. Check the server before enabling another submission.
     if (state.session) await refreshJobs(true).catch(() => {});
   } finally { state.busy = false; updateControls(); }
@@ -552,7 +571,7 @@ async function applyAction(action) {
     for (const id of applied) { state.applied.set(id, action); state.selected.delete(id); }
     const codes = [...new Set(failed.map(item => item.code))].map(code => ERROR_MESSAGES[code] || String(code).replaceAll('_', ' '));
     notify(`${applied.length} email${applied.length === 1 ? '' : 's'} ${archive ? 'archived' : 'marked read'}.${failed.length ? ` ${failed.length} could not be changed. ${codes.join(' ')}` : ''}`, failed.length ? 'error' : 'success');
-  } catch (error) { notify(describeError(error), 'error'); }
+  } catch (error) { notifyError(error); }
   finally { state.busy = false; renderMessages(); updateControls(); }
 }
 async function cancelBriefing() {
@@ -562,7 +581,7 @@ async function cancelBriefing() {
   if (!confirmed || state.busy || state.activeId !== id) return;
   state.busy = true; updateControls();
   try { await api(jobPath(id), {method: 'DELETE'}); await loadJob(id); notify('Briefing cancelled. Your emails are unchanged.'); }
-  catch (error) { notify(describeError(error), 'error'); }
+  catch (error) { notifyError(error); }
   finally { state.busy = false; updateControls(); }
 }
 function loadVoices() {
@@ -659,8 +678,8 @@ $('mark-read').addEventListener('click', () => applyAction('mark_read'));
 $('clear-selection').addEventListener('click', () => { state.selected.clear(); renderMessages(); updateControls(); });
 $('refresh-accounts').addEventListener('click', async () => {
   $('refresh-accounts').disabled = true;
-  try { await Promise.all([refreshAccounts(), refreshStatus()]); notify('Connection status refreshed. Use Test connection on an account to check its mailbox login.'); }
-  catch (error) { notify(describeError(error), 'error'); }
+  try { const [, status] = await Promise.all([refreshAccounts(), refreshStatus()]); if (status?.ready) notify('Connection status refreshed. Use Test connection on an account to check its mailbox login.'); }
+  catch (error) { notifyError(error); }
   finally { $('refresh-accounts').disabled = false; }
 });
 $('login-form').addEventListener('submit', async event => {
@@ -684,11 +703,11 @@ $('mail-menu').addEventListener('click', openMailFromToolbar, {capture: true});
 $('mail-refresh').addEventListener('click', openMailFromToolbar, {capture: true});
 $('mail-advanced').addEventListener('click', openMailFromToolbar, {capture: true});
 window.addEventListener('hashchange', setPage);
-window.addEventListener('online', () => { if (state.session) { refreshStatus().catch(error => notify(describeError(error), 'error')); refreshJobs().catch(() => {}); } });
+window.addEventListener('online', () => { if (state.session) { refreshStatus().catch(error => notifyError(error)); refreshJobs().catch(() => {}); } });
 window.addEventListener('offline', () => { $('connection').textContent = 'Offline'; $('connection').className = 'connection error'; notify('You are offline. Reconnect to Tailscale to load mail or check the briefing running on your homeserver.'); });
 document.addEventListener('visibilitychange', () => {
   // Briefings belong to the server session. Hiding or closing this page must never cancel one.
-  if (!document.hidden && state.session) refreshJobs().catch(error => notify(describeError(error), 'error'));
+  if (!document.hidden && state.session) refreshJobs().catch(error => notifyError(error));
 });
 let installPrompt;
 window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; $('install').hidden = false; });
