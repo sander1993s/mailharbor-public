@@ -14,7 +14,8 @@ import sys
 import zlib
 
 EMAIL = re.compile(r"[A-Za-z0-9][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
-PUBLIC_EMAILS = {'notify@web3forms.com'}
+# GitHub uses this public committer address for generated pull-request merge commits.
+PUBLIC_EMAILS = {'notify@web3forms.com', 'noreply@github.com'}
 # These exact values exercise protocol rejection/authentication in synthetic tests.
 TEST_EMAILS = {'fixture-#@app.web3forms.com', 'mail@app.web3forms.com', 'user@fcm.googleapis.com'}
 RULES = [
