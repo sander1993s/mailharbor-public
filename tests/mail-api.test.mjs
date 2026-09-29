@@ -409,6 +409,128 @@ test('label changes during an advanced provider query invalidate the late result
   release({ messages: [item()], total: 1, totalComplete: true, errors: [] }); await pending;
 });
 
+test('label filters include any chosen label, exclude matching labels, and preserve the rest of the search', async t => {
+  const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
+  const custom = (await h.tags.manage({ action: 'create', label: 'Client project' })).label.id;
+  await h.api.setTag({ id: 'a-message', tag: 'work', enabled: true });
+  await h.api.setTag({ id: 'b-message', tag: custom, enabled: true });
+  await h.api.setTag({ id: 'b-message', tag: 'newsletters', enabled: true });
+  const requests = [];
+  h.reader.list = async (current, options) => {
+    requests.push(options);
+    assert.deepEqual(current.map(account => account.id), ['a', 'b']);
+    assert.equal(options.folder, 'inbox'); assert.equal(options.query, 'contract');
+    assert.deepEqual(options.filters, { unread: false });
+    assert.equal(options.bodySearch, true); assert.equal(options.sort, 'date_asc'); assert.equal(options.live, true);
+    return { messages: options.excludedReferences ? [item('a')] : [item('a'), item('b')], total: options.excludedReferences ? 1 : 2, totalComplete: true, errors: [] };
+  };
+  const criteria = { folder: 'inbox', query: 'contract', filters: { includeLabels: ['work', custom], unread: false }, bodySearch: true, sort: 'date_asc', live: true };
+  assert.equal((await h.api.list(criteria)).total, 2);
+  assert.deepEqual(requests[0].scopedReferences.map(reference => reference.accountId).sort(), ['a', 'b']);
+  const filtered = await h.api.list({ ...criteria, filters: { ...criteria.filters, excludeLabels: ['newsletters'] } });
+  assert.equal(filtered.total, 1); assert.deepEqual(filtered.messages.map(message => message.accountId), ['a']);
+  assert.deepEqual(requests[1].scopedReferences.map(reference => reference.accountId), ['a']);
+  assert.deepEqual(requests[1].excludedReferences.map(reference => reference.accountId), ['b']);
+  assert.doesNotMatch(JSON.stringify(filtered), /fingerprint|reference|uidValidity/);
+});
+
+test('label filters intersect label folders and account scope, with exclusions winning overlaps', async t => {
+  const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
+  for (const id of ['a-message', 'b-message']) await h.api.setTag({ id, tag: 'work', enabled: true });
+  await h.api.setTag({ id: 'b-message', tag: 'newsletters', enabled: true });
+  const before = h.calls.length;
+  const filtered = await h.api.list({ folder: 'tag:work', filters: { includeLabels: ['work'], excludeLabels: ['newsletters'] } });
+  assert.deepEqual(filtered.messages.map(message => message.accountId), ['a']); assert.equal(filtered.total, 1);
+  assert.equal((await h.api.list({ folder: 'tag:work', accountIds: ['b'], filters: { excludeLabels: ['newsletters'] } })).total, 0);
+  assert.equal((await h.api.list({ folder: 'inbox', accountIds: ['a'], filters: { includeLabels: ['work'], excludeLabels: ['work'] } })).total, 0);
+  assert.equal((await h.api.list({ folder: 'inbox', accountIds: ['a'], filters: { includeLabels: ['newsletters'] } })).total, 0);
+  assert.equal(h.calls.length, before, 'Empty inclusions and label-only folder searches need no provider query.');
+});
+
+test('label filter validation rejects malformed, duplicate and unknown IDs before provider access', async t => {
+  const h = harness(); t.after(() => h.api.close());
+  for (const value of ['work', null, [null], [1], ['unknown'], ['tag:work'], ['work', 'work'], Array(114).fill('work')]) {
+    for (const key of ['includeLabels', 'excludeLabels']) {
+      await assert.rejects(h.api.list({ folder: 'inbox', filters: { [key]: value } }), { code: 'invalid_request' });
+    }
+  }
+  assert.deepEqual(h.calls, []);
+  const custom = (await h.tags.manage({ action: 'create', label: 'Temporary project' })).label.id;
+  assert.equal((await h.api.list({ folder: 'inbox', filters: { includeLabels: [custom] } })).total, 0);
+  await h.tags.manage({ action: 'delete', id: custom });
+  await assert.rejects(h.api.list({ folder: 'inbox', filters: { includeLabels: [custom] } }), { code: 'invalid_request' });
+  assert.deepEqual(h.calls, []);
+});
+
+test('exclusion-only searches retain unlabeled mail and bind pagination to matching label membership', async t => {
+  const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
+  await h.api.setTag({ id: 'a-message', tag: 'newsletters', enabled: true });
+  const cursors = [];
+  h.reader.list = async (_current, options) => {
+    assert.equal(options.scopedReferences, undefined);
+    assert.deepEqual(options.excludedReferences.map(reference => reference.accountId), ['a']);
+    assert.deepEqual(options.filters, {}); cursors.push(options.cursor);
+    return { messages: [item('b')], nextCursor: options.cursor ? null : { page: 2 }, total: 2, totalComplete: true, errors: [] };
+  };
+  const criteria = { folder: 'inbox', filters: { excludeLabels: ['newsletters'] } };
+  const first = await h.api.list(criteria);
+  assert.deepEqual(first.messages[0].tags, []);
+  assert.equal((await h.api.list({ ...criteria, cursor: first.nextCursor })).nextCursor, null);
+  assert.deepEqual(cursors, [null, { page: 2 }]);
+  await assert.rejects(h.api.list({ ...criteria, filters: { excludeLabels: ['work'] }, cursor: first.nextCursor }), { code: 'stale_message' });
+  await h.api.setTag({ id: 'b-message', tag: 'newsletters', enabled: true });
+  await assert.rejects(h.api.list({ ...criteria, cursor: first.nextCursor }), { code: 'stale_message' });
+  assert.equal(cursors.length, 2);
+});
+
+test('label-filter pagination survives read flags, refreshed metadata and unrelated label changes', async t => {
+  const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
+  for (const id of ['a-message', 'b-message']) await h.api.setTag({ id, tag: 'work', enabled: true });
+  const cursors = [];
+  h.reader.list = async (_current, options) => {
+    cursors.push(options.cursor);
+    return { messages: [item(options.cursor ? 'b' : 'a')], nextCursor: options.cursor ? null : { page: 2 }, total: 2, totalComplete: true, errors: [] };
+  };
+  const criteria = { folder: 'inbox', filters: { includeLabels: ['work'], excludeLabels: ['newsletters'] } };
+  const first = await h.api.list(criteria);
+  const firstVersion = h.tags.version();
+  await h.api.apply({ id: first.messages[0].id, action: 'mark_read' });
+  await h.api.apply({ id: first.messages[0].id, action: 'star' });
+  await h.tags.observe([h.accounts.get('b')], [{ ...item('b'), subject: 'Refreshed subject' }]);
+  await h.api.setTag({ id: first.messages[0].id, tag: 'finance', enabled: true });
+  assert.ok(h.tags.version() > firstVersion, 'Metadata changes increment the tag store version.');
+  const next = await h.api.list({ ...criteria, cursor: first.nextCursor });
+  assert.equal(next.nextCursor, null); assert.equal(next.messages[0].accountId, 'b');
+  assert.deepEqual(cursors, [null, { page: 2 }]);
+  await h.api.setTag({ id: 'b-message', tag: 'work', enabled: false });
+  await assert.rejects(h.api.list({ ...criteria, cursor: first.nextCursor }), { code: 'stale_message' });
+  assert.equal(cursors.length, 2);
+});
+
+test('metadata and unrelated labels can change during a label query without invalidating its scope', async t => {
+  const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
+  await h.api.setTag({ id: 'a-message', tag: 'work', enabled: true });
+  let release;
+  h.reader.list = async () => new Promise(resolve => { release = resolve; });
+  const pending = h.api.list({ folder: 'inbox', filters: { includeLabels: ['work'] } });
+  await h.api.apply({ id: 'a-message', action: 'mark_read' });
+  await h.api.setTag({ id: 'a-message', tag: 'finance', enabled: true });
+  release({ messages: [{ ...item('a'), unread: false }], total: 1, totalComplete: true, errors: [] });
+  const result = await pending;
+  assert.equal(result.total, 1); assert.equal(result.messages[0].unread, false);
+  assert.deepEqual(result.messages[0].tags, ['work', 'finance']);
+});
+
+test('label changes during an exclusion-only provider query invalidate the late result', async t => {
+  const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
+  await h.api.setTag({ id: 'a-message', tag: 'work', enabled: true });
+  let release;
+  h.reader.list = async () => new Promise(resolve => { release = resolve; });
+  const pending = assert.rejects(h.api.list({ folder: 'inbox', filters: { excludeLabels: ['work'] } }), { code: 'stale_message' });
+  await h.api.setTag({ id: 'a-message', tag: 'work', enabled: false });
+  release({ messages: [item('b')], total: 1, totalComplete: true, errors: [] }); await pending;
+});
+
 test('bulk actions require explicit permanent-delete confirmation, process serially, and sanitize partial failures', async t => {
   const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
   let active = 0;

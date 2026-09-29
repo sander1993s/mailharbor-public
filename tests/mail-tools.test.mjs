@@ -242,7 +242,7 @@ test('one selection checkbox tracks empty, partial and complete capped selection
 test('advanced search opens externally, retains edits, and closes on Escape, apply and route change', async t => {
   const view = setup(t), panel = () => view.nodes().find(node => node.id === 'mail-advanced-search');
   assert.equal(panel().hidden,true); assert.equal(view.advancedButton.attributes.get('aria-expanded'),'false');
-  view.advancedButton.dispatch('click'); assert.equal(panel().hidden,false); assert.equal(document.activeElement,view.field('From'));
+  view.advancedButton.dispatch('click'); assert.equal(panel().hidden,false); assert.equal(document.activeElement,panel().querySelector('[data-mail-label-filter]'));
   const field = view.field('From'); field.value='saved@example.test'; field.dispatch('input');
   view.tools.render(view.host,view.mounts); assert.equal(view.field('From'),field);
   panel().dispatch('keydown',{key:'Escape'}); assert.equal(panel().hidden,true); assert.equal(document.activeElement,view.advancedButton);
@@ -330,7 +330,7 @@ test('advanced search commits with shared search submission callback', t => {
   const panel = view.nodes().find(node => node.id === 'mail-advanced-search');
   assert.ok(panel);
 
-  const searchBtn = panel.querySelectorAll('*').find(node => node.tagName === 'button' && node.textContent === 'Search');
+  const searchBtn = panel.querySelectorAll('*').find(node => node.tagName === 'button' && node.textContent === 'Apply filters');
   assert.ok(searchBtn);
   panel.children.find(node => node.tagName === 'form').dispatch('submit');
   assert.equal(submissions.length, 1);
@@ -477,4 +477,70 @@ test('removeCriteria preserves remaining draft fields and commits once', t => {
   assert.equal(submits.length, 1);
   assert.equal(submits[0].filters.subject, undefined);
   assert.equal(submits[0].filters.from, 'keep@example.com');
+});
+
+test('label filters build independent, normalized lists and omit empty selections', () => {
+  const values = {includeLabels:['work',' custom_one ','work'],excludeLabels:['coupons'],unread:'false'};
+  const filters = buildMailFilters(values);
+  assert.deepEqual(filters,{includeLabels:['custom_one','work'],excludeLabels:['coupons'],unread:false});
+  filters.includeLabels.push('social');
+  assert.deepEqual(values.includeLabels,['work',' custom_one ','work']);
+  assert.deepEqual(buildMailFilters({includeLabels:[],excludeLabels:[]}),{});
+  assert.throws(() => buildMailFilters({includeLabels:'work'}),/Choose labels/u);
+});
+
+test('Filters keeps Labels visible and Advanced search collapsed while include/exclude changes remain a draft', t => {
+  const submissions = [], view = setup(t,{onSearchSubmit:draft => submissions.push(draft)});
+  view.state.folders.push({id:'tag:work',label:'Work & Administration'},{id:'tag:coupons',label:'Coupons'});
+  view.tools.render(view.host);
+  const panel = () => view.host.querySelector('#mail-advanced-search');
+  const label = id => panel().querySelector(`[data-mail-label-filter="${id}"]`);
+  const advanced = () => panel().querySelector('.mail-filter-advanced');
+  const choose = (id,value) => { label(id).value = value; label(id).dispatch('change'); };
+
+  view.advancedButton.dispatch('click');
+  assert.equal(panel().attributes.get('aria-label'),'Filters');
+  assert.equal(advanced().open,false);
+  assert.equal(label('work').closest('details'),null,'Labels stay outside the collapsed advanced section');
+  assert.equal(view.button('Apply filters').closest('details'),null,'Apply remains available without expanding advanced search');
+  assert.equal(view.button('Clear').closest('details'),null);
+  choose('work','include'); choose('coupons','exclude'); choose('custom_one','include');
+  assert.deepEqual(view.state.filters,{},'Selections are not committed while editing');
+  assert.equal(submissions.length,0);
+  panel().dispatch('keydown',{key:'Escape'}); view.advancedButton.dispatch('click');
+  assert.equal(label('work').value,'include');
+  assert.equal(advanced().open,false);
+  view.button('Apply filters').dispatch('click');
+  assert.deepEqual(submissions[0].filters,{includeLabels:['custom_one','work'],excludeLabels:['coupons']});
+  assert.equal(submissions[0].allFolders,false,'Labels retain the current folder scope');
+  assert.equal(panel().hidden,true);
+
+  choose('work','exclude');
+  assert.deepEqual(view.tools.readDraft().filters,{includeLabels:['custom_one'],excludeLabels:['coupons','work']},'A label cannot be included and excluded by the same control');
+  assert.deepEqual(submissions[0].filters.includeLabels,['custom_one','work'],'Editing the draft cannot mutate the committed request');
+  choose('work','');
+  assert.deepEqual(view.tools.readDraft().filters,{includeLabels:['custom_one'],excludeLabels:['coupons']});
+
+  advanced().open = true; advanced().dispatch('toggle');
+  view.state.folders.push({id:'tag:custom_two',label:'Client project'}); view.tools.render(view.host);
+  assert.equal(advanced().open,true,'Metadata redraw preserves the open disclosure');
+  assert.ok(label('custom_two'),'New shared labels are available');
+  assert.equal(label('coupons').value,'exclude','Metadata redraw preserves label drafts');
+});
+
+test('label restoration, individual removal and clear preserve independent criteria arrays', t => {
+  const submissions = [], view = setup(t,{onSearchSubmit:draft => submissions.push(draft)});
+  const criteria = {filters:{includeLabels:['work','custom_one'],excludeLabels:['coupons'],from:'boss@example.test'},allFolders:true};
+  view.tools.restoreCriteria(criteria);
+  view.tools.getFilterDraft().includeLabels.push('social');
+  assert.deepEqual(criteria.filters.includeLabels,['work','custom_one'],'Restored arrays are copied');
+  view.tools.removeCriteria('includeLabels','custom_one');
+  assert.deepEqual(submissions[0].filters,{includeLabels:['social','work'],excludeLabels:['coupons'],from:'boss@example.test'});
+  assert.equal(submissions[0].allFolders,true);
+  view.tools.removeCriteria('excludeLabels','coupons');
+  assert.equal(submissions[1].filters.excludeLabels,undefined);
+  view.tools.clearFilters();
+  assert.deepEqual(view.tools.readDraft().filters,{});
+  assert.equal(view.tools.readDraft().allFolders,false);
+  assert.equal(view.host.querySelector('[data-mail-label-filter="custom_one"]').value,'');
 });

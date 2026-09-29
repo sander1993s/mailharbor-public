@@ -3,6 +3,7 @@ import { createServer, closeServer } from '../../server/app.mjs';
 import { createWebFactory } from '../../server/web-app.mjs';
 import { ACCOUNT_PRESETS } from './accounts.mjs';
 import { MAIL_FOLDERS } from '../../server/mail-api.mjs';
+import { createMailTags } from '../../server/mail-tags.mjs';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { zipSync } from 'fflate';
@@ -340,6 +341,12 @@ const messageToHeader = message => {
   };
 };
 
+const previewTags = createMailTags({store});
+for (const [index, tags] of [[1,['work']], [3,['work','coupons']], [4,['work']], [5,['coupons']], [122,['work']]]) {
+  const message = base[index], account = stored.accounts.find(value => value.id === message.accountId);
+  for (const tag of tags) await previewTags.set({account,message:messageToHeader(message),reference:message.reference,tag,enabled:true});
+}
+
 const reader = {
   async folders(accounts) {
     return {
@@ -360,8 +367,11 @@ const reader = {
       errors: []
     };
   },
-  async list(accounts, { folder, query, cursor, limit, filters = {}, sort = 'date_desc', bodySearch = false }) {
+  async list(accounts, { folder, query, cursor, limit, filters = {}, sort = 'date_desc', bodySearch = false, scopedReferences, excludedReferences = [] }) {
     let values = base.filter(message => accounts.some(account => account.id === message.accountId) && inFolder(message, folder));
+    const matches = (message, reference) => ['accountId','path','uid','uidValidity','fingerprint'].every(key => message.reference[key] === reference[key]);
+    if (scopedReferences) values = values.filter(message => scopedReferences.some(reference => matches(message,reference)));
+    values = values.filter(message => !excludedReferences.some(reference => matches(message,reference)));
     if (query) values = values.filter(message => `${message.subject} ${message.author} ${message.to} ${bodySearch ? 'fictional schedule test mailbox' : ''}`.toLowerCase().includes(query.toLowerCase()));
     for (const [key, filter] of Object.entries(filters)) values = values.filter(message => {
       if (key === 'from') return message.author.toLowerCase().includes(filter.toLowerCase());

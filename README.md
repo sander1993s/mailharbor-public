@@ -20,6 +20,8 @@ This is a single-owner application. A new installation has no connected email ac
 
 Mailbox changes affect the original provider. Archive retains mail; permanent deletion requires explicit confirmation. Provider capabilities, plan restrictions, and administrator policies can limit available features.
 
+Open **Filters → Labels** to include or exclude shared labels in the current folder and account selection. For example, include **Work & Administration** to show work emails. Multiple included labels match any of those labels; an excluded label always hides a matching message. Expand **Advanced search** for sender, date, attachment, and other criteria, or to search all folders. Advanced search starts collapsed.
+
 ## Add email accounts
 
 Open **Settings → Accounts**, add an account, choose a provider, enter your own email address and label, and connect it. Multiple accounts from the same provider are supported. A custom IMAP/SMTP connection covers compatible providers without a built-in preset.

@@ -974,6 +974,43 @@ test('label-scoped search verifies fingerprints and deduplicates physical copies
   await assert.rejects(h.reader.list(h.accounts, { folder: 'all', filters: { unread: true }, scopedReferences: scopedReferences.slice(0, 1), cursor: first.nextCursor }), { code: 'stale_message' });
 });
 
+test('excluded labels are removed before counting and paging, including beyond the first provider page', async () => {
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages: Array.from({ length: 120 }, (_, index) => mail(index + 1)) }] } });
+  const originals = await h.reader.list(h.accounts, { limit: 100 });
+  const excludedReferences = originals.messages.filter(message => message.reference.uid <= 60).map(message => message.reference);
+  const criteria = { folder: 'inbox', query: 'Message', filters: { unread: true }, excludedReferences, limit: 50 };
+  const first = await h.reader.list(h.accounts, criteria);
+  assert.equal(first.total, 60); assert.equal(first.totalComplete, true);
+  assert.deepEqual(first.messages.map(message => message.reference.uid), Array.from({ length: 50 }, (_, index) => index + 61));
+  const next = await h.reader.list(h.accounts, { ...criteria, cursor: first.nextCursor });
+  assert.equal(next.total, 60); assert.equal(next.nextCursor, null);
+  assert.deepEqual(next.messages.map(message => message.reference.uid), Array.from({ length: 10 }, (_, index) => index + 111));
+  await assert.rejects(h.reader.list(h.accounts, { ...criteria, excludedReferences: excludedReferences.slice(1), cursor: first.nextCursor }), { code: 'stale_message' });
+
+  const scopedReferences = originals.messages.filter(message => message.reference.uid <= 90).map(message => message.reference);
+  const included = await h.reader.list(h.accounts, { ...criteria, scopedReferences, limit: 20 });
+  assert.equal(included.total, 30);
+  assert.deepEqual(included.messages.map(message => message.reference.uid), Array.from({ length: 20 }, (_, index) => index + 61));
+  const remainder = await h.reader.list(h.accounts, { ...criteria, scopedReferences, limit: 20, cursor: included.nextCursor });
+  assert.equal(remainder.total, 30); assert.equal(remainder.nextCursor, null);
+  assert.deepEqual(remainder.messages.map(message => message.reference.uid), Array.from({ length: 10 }, (_, index) => index + 81));
+});
+
+test('excluded label fingerprints stay account-scoped and win over the inclusion scope', async () => {
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages: [mail(1)] }, { path: 'Projects', messages: [{ ...mail(1), uid: 9 }] }] }, b: {} });
+  const originals = await h.reader.list(h.accounts);
+  const excludedReferences = originals.messages.filter(message => message.accountId === 'a').map(message => message.reference);
+  const scopedReferences = originals.messages.map(message => message.reference);
+  for (const inclusion of [{}, { scopedReferences }]) {
+    const result = await h.reader.list(h.accounts, { folder: 'all', excludedReferences, ...inclusion });
+    assert.equal(result.total, 1); assert.equal(result.messages[0].accountId, 'b');
+  }
+  for (const invalid of [{}, [null], [{ ...excludedReferences[0], accountId: 'outside' }]]) {
+    await assert.rejects(h.reader.list(h.accounts, { excludedReferences: invalid }), { code: 'invalid_request' });
+  }
+  await assert.rejects(h.reader.list(h.accounts, { excludedReferences: [{ ...excludedReferences[0], fingerprint: 'bad' }] }), { code: 'stale_message' });
+});
+
 test('content reader reads complete plain text and returns structured contract without marking seen', async () => {
   const plainMail = mail(1, {
     body: 'Hello, this is a complete plain message.',

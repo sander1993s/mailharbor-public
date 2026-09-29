@@ -201,6 +201,7 @@ export function createMailView(options = {}) {
 
   const mailTools = createMailTools({
     api, describeError, state,
+    getLabels: () => labels(),
     refresh: opts => requestList(opts),
     renderList,
     renderReader,
@@ -425,6 +426,18 @@ export function createMailView(options = {}) {
     }
 
     for (const [key, val] of Object.entries(state.filters)) {
+      if (key === 'includeLabels' || key === 'excludeLabels') {
+        for (const id of val) {
+          const name = labels().find(label => label.id === id)?.label || id;
+          const label = `${key === 'includeLabels' ? 'Include' : 'Exclude'}: ${name}`;
+          const chip = make('span', undefined, 'mail-filter-chip');
+          chip.append(make('span', label));
+          const remove = button('✕', () => mailTools.removeCriteria(key, id), 'mail-chip-remove');
+          remove.setAttribute('aria-label', `Remove ${label} filter`);
+          chip.append(remove); chipsWrapper.append(chip);
+        }
+        continue;
+      }
       const chip = make('span', undefined, 'mail-filter-chip');
       let label = `${key}: ${val}`;
       if (key === 'unread') label = val ? 'Unread' : 'Read';
@@ -1144,7 +1157,7 @@ export function createMailView(options = {}) {
         }
         renderFolders();
       }
-      if (state.folder.startsWith('tag:')) requestList({refreshMetadata: !updatedFolders.length, preserveReader: true});
+      if (state.folder.startsWith('tag:') || state.filters.includeLabels?.length || state.filters.excludeLabels?.length) requestList({refreshMetadata: !updatedFolders.length, preserveReader: true});
       else if (!updatedFolders.length) void refreshCounts();
       setNotice(`${labels().find(item => item.id === tag)?.label || 'Mail'} label ${enabled ? 'added' : 'removed'}.`);
     } catch (error) { if (session === state.session) { if (labelMessageId === id) labelError = errorText(error); setNotice(errorText(error), true); } }

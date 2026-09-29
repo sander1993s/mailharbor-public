@@ -151,7 +151,8 @@ export async function createMailCacheReader({
     if (options.filters !== undefined && (typeof options.filters !== 'object' || options.filters === null || Array.isArray(options.filters))) {
       throw new MailHarborError('invalid_request', errorMessages.invalid_request);
     }
-    if (options.scopedReferences !== undefined && !Array.isArray(options.scopedReferences)) {
+    if ((options.scopedReferences !== undefined && !Array.isArray(options.scopedReferences)) ||
+        (options.excludedReferences !== undefined && !Array.isArray(options.excludedReferences))) {
       throw new MailHarborError('invalid_request', errorMessages.invalid_request);
     }
     if (options.sort !== undefined && typeof options.sort !== 'string') {
@@ -172,7 +173,7 @@ export async function createMailCacheReader({
     if (options.query !== undefined && options.query !== '') return false;
     if (options.filters !== undefined && Object.keys(options.filters).length > 0) return false;
     if (options.bodySearch) return false;
-    if (options.scopedReferences !== undefined) return false;
+    if (options.scopedReferences !== undefined || options.excludedReferences !== undefined) return false;
     if (options.sort !== undefined && options.sort !== 'date_desc') return false;
     const filterKeys = ['seen', 'unseen', 'flagged', 'unflagged', 'since', 'before', 'sentSince', 'larger', 'smaller', 'from', 'to', 'subject', 'body', 'text'];
     for (const k of filterKeys) {

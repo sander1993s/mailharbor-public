@@ -24,6 +24,18 @@ print(json.dumps([len(value) for value in values]))
 `);
   assert.deepEqual(result, [1, 1, 1, 1, 0, 0]);
 });
+test('privacy scanner accepts GitHub merge commit identity without allowing other GitHub addresses', () => {
+  const result = run(`
+addresses = ['noreply@github.com', 'developer' + '@github.com', 'noreply' + '@github.com.private-provider.com']
+print(json.dumps([privacy.scan('commit-metadata', ('committer GitHub <' + address + '> 0 +0000').encode()) for address in addresses]))
+`);
+  assert.deepEqual(result, [
+    [],
+    [['commit-metadata', 1, 'non-example email address']],
+    [['commit-metadata', 1, 'non-example email address']],
+  ]);
+});
+
 test('release packaging includes only tracked source and rejects tracked private data', () => {
   const result = run(`
 spec=importlib.util.spec_from_file_location('package','scripts/package.py')
