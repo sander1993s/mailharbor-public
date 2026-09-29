@@ -512,25 +512,28 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
   }
 
   async function list(accounts, { folder = 'inbox', query = '', cursor = null, limit = 50, signal, includeAttachments = false,
-    filters = {}, sort = 'date_desc', bodySearch = false, scopedReferences, includeStatus = false } = {}) {
+    filters = {}, sort = 'date_desc', bodySearch = false, scopedReferences, excludedReferences, includeStatus = false } = {}) {
     validateAccounts(accounts);
     if ((!VALID_FOLDERS.has(folder) && !customId(folder)) || typeof query !== 'string' || query.length > 200 || /[\u0000-\u001f\u007f]/u.test(query) ||
       !Number.isInteger(limit) || limit < 1 || limit > 100 || typeof includeAttachments !== 'boolean' || typeof bodySearch !== 'boolean' || typeof includeStatus !== 'boolean' ||
       !['date_desc', 'date_asc', 'subject_asc', 'sender_asc'].includes(sort)) fail('invalid_request');
     validateFilters(filters);
-    let scoped;
-    if (scopedReferences !== undefined) {
-      if (!Array.isArray(scopedReferences) || scopedReferences.length > 250000) fail('invalid_request');
-      scoped = new Set(scopedReferences.map(reference => {
+    const referenceScope = references => {
+      if (references === undefined) return undefined;
+      if (!Array.isArray(references) || references.length > 250000) fail('invalid_request');
+      return new Set(references.map(reference => {
         const account = accounts.find(value => value.id === reference?.accountId);
         if (!account) fail('invalid_request');
         referenceCheck(account, reference);
         return `${account.id}:${reference.fingerprint}`;
       }));
-    }
+    };
+    const scoped = referenceScope(scopedReferences), excluded = referenceScope(excludedReferences);
+    const filteredReferences = scoped !== undefined || excluded !== undefined;
     if ((folder === 'unread' && filters.unread === false) || (folder === 'starred' && filters.starred === false)) fail('invalid_request');
     query = query.trim();
     const scope = hash({ folder, query, filters: Object.entries(filters).sort(), sort, bodySearch, scoped: scoped ? [...scoped].sort() : null,
+      excluded: excluded ? [...excluded].sort() : null,
       accounts: accounts.map(account => [account.id, account.email, account.updatedAt, account.archivePath]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))) });
     if (cursor && (cursor.version !== 1 || cursor.scope !== scope || !Array.isArray(cursor.accounts) || !cursor.after)) fail('stale_message');
     const candidates = [], snapshots = [], errors = [], states = [];
@@ -592,7 +595,7 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
               if (!Array.isArray(found) || found.some(uid => !validUid(uid))) fail('mailbox_error');
               // UID bounds freeze arrivals for pagination; ordering always uses dates.
               const initial = new Set(found.filter(uid => !old || uid <= old.maxUid)), fetched = new Set();
-              if (filters.hasAttachment == null && !scoped) accountTotal += initial.size;
+              if (filters.hasAttachment == null && !filteredReferences) accountTotal += initial.size;
               let maxUid = old?.maxUid ?? 0;
               for (const uid of initial) maxUid = Math.max(maxUid, uid);
               accountFolders.push({ path: target.path, uidValidity, maxUid });
@@ -610,11 +613,12 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
                       (folder === 'starred' && !has(message.flags, '\\Flagged')) || (target.gmailArchive && has(message.labels, '\\Inbox'))) continue;
                     const value = metadata(account, target.path, uidValidity, message);
                     if (scoped && !scoped.has(`${account.id}:${value.reference.fingerprint}`)) continue;
+                    if (excluded?.has(`${account.id}:${value.reference.fingerprint}`)) continue;
                     if (scoped && scopedSeen.has(value.reference.fingerprint)) continue;
                     if (filters.hasAttachment != null) {
                       if (value.hasAttachments !== filters.hasAttachment) continue;
                     }
-                    if (filters.hasAttachment != null || scoped) accountTotal++;
+                    if (filters.hasAttachment != null || filteredReferences) accountTotal++;
                     if (scoped) scopedSeen.add(value.reference.fingerprint);
                     if (includeAttachments) value.invoiceDocuments = invoiceParts(message.bodyStructure).map(({ filename, mimeType }) => ({ filename, mimeType }));
                     offer(folderCandidates, { time: timestamp(message), sortKey: sort === 'subject_asc' ? value.subject.toLowerCase() :
@@ -625,7 +629,7 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
                 }
               }
               let complete = false;
-              if (initial.size > HEADER_CHUNK && sort === 'date_desc' && filters.hasAttachment == null && !scoped) {
+              if (initial.size > HEADER_CHUNK && sort === 'date_desc' && filters.hasAttachment == null && !filteredReferences) {
                 for (const days of WINDOWS) {
                   abortCheck(signal);
                   const cutoff = midnight - days * DAY, date = new Date(cutoff);

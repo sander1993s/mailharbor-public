@@ -1226,6 +1226,127 @@ test('search submission commits query and advanced filters together in single re
   view.reset();
 });
 
+test('label filters submit Work includes and exclusions, show named removable chips, and clear together', async t => {
+  const {get} = dom(t), calls = [];
+  const account = {id:'a',connected:true};
+  const messages = [
+    {id:'work',accountId:'a',subject:'Project update',tags:['work','custom_client']},
+    {id:'offer',accountId:'a',subject:'Work offer',tags:['work','coupons']},
+    {id:'personal',accountId:'a',subject:'Dinner',tags:[]}
+  ];
+  const view = createMailView({api:async (path,options) => {
+    if (path === '/api/mail/folders') return {accounts:[account],folders:[{id:'inbox',accountIds:['a']},{id:'tag:work',label:'Work'},{id:'tag:custom_client',label:'Client project'}]};
+    if (path === '/api/mail/list') {
+      calls.push(options.body);
+      const filters = options.body.filters ?? {};
+      const selected = messages.filter(message => (!filters.includeLabels?.length || filters.includeLabels.some(id => message.tags.includes(id))) && !filters.excludeLabels?.some(id => message.tags.includes(id)));
+      return {messages:selected,total:selected.length,totalComplete:true};
+    }
+    return {};
+  }});
+  view.show(); await nextTurn();
+  const panel = () => get('mail-tools').querySelector('#mail-advanced-search');
+  const choose = (id,value) => { const select = panel().querySelector(`[data-mail-label-filter="${id}"]`); assert.ok(select); select.value = value; select.dispatch('change'); };
+  const apply = () => panel().querySelector('form').dispatch('submit');
+  get('mail-advanced').dispatch('click');
+  assert.equal(panel().querySelector('.mail-filter-advanced').open,false);
+  assert.ok(panel().querySelector('[data-mail-label-filter="custom_client"]'),'Shared custom labels appear in filters');
+  choose('work','include'); apply(); await nextTurn();
+  assert.deepEqual(calls.at(-1).filters,{includeLabels:['work']});
+  assert.equal(calls.at(-1).folder,'inbox');
+  assert.deepEqual(get('mail-list').querySelectorAll('[data-message-id]').map(node => node.dataset.messageId),['work','offer']);
+  assert.match(get('mail-search-summary').textContent,/Include: Work/u);
+
+  get('mail-advanced').dispatch('click'); choose('coupons','exclude'); apply(); await nextTurn();
+  assert.deepEqual(calls.at(-1).filters,{includeLabels:['work'],excludeLabels:['coupons']});
+  assert.deepEqual(get('mail-list').querySelectorAll('[data-message-id]').map(node => node.dataset.messageId),['work']);
+  assert.match(get('mail-search-summary').textContent,/Exclude: Coupons/u);
+  const countBeforeRemove = calls.length;
+  get('mail-search-summary').querySelector('[aria-label="Remove Include: Work filter"]').dispatch('click'); await nextTurn();
+  assert.equal(calls.length,countBeforeRemove + 1);
+  assert.deepEqual(calls.at(-1).filters,{excludeLabels:['coupons']});
+  assert.equal(panel().querySelector('[data-mail-label-filter="work"]').value,'');
+
+  choose('work','exclude'); apply(); await nextTurn();
+  assert.deepEqual(calls.at(-1).filters,{excludeLabels:['coupons','work']});
+  assert.deepEqual(get('mail-list').querySelectorAll('[data-message-id]').map(node => node.dataset.messageId),['personal']);
+  get('mail-search-summary').querySelector('.mail-clear-all-chip').dispatch('click'); await nextTurn();
+  assert.equal(calls.at(-1).filters,undefined);
+  assert.equal(panel().querySelector('[data-mail-label-filter="coupons"]').value,'');
+  assert.equal(get('mail-list').querySelectorAll('[data-message-id]').length,3);
+});
+
+test('cancel and retry preserve label arrays, and history restores prior label controls', async t => {
+  const {get,history} = dom(t), pending = [];
+  const message = {id:'work',accountId:'a',subject:'Work message',tags:['work'],body:'Work message body'};
+  const view = createMailView({api:async (path,options) => {
+    if (path === '/api/mail/folders') return {accounts:[{id:'a',connected:true}],folders:[{id:'inbox',accountIds:['a']}]};
+    if (path === '/api/mail/message') return {message};
+    if (path === '/api/mail/list') {
+      if (options.body.filters?.excludeLabels?.includes('work')) return new Promise(resolve => pending.push({options,resolve}));
+      return {messages:[message],total:1,totalComplete:true};
+    }
+    return {};
+  }});
+  view.show(); await nextTurn();
+  const panel = () => get('mail-tools').querySelector('#mail-advanced-search');
+  const choose = (id,value) => { const select = panel().querySelector(`[data-mail-label-filter="${id}"]`); select.value = value; select.dispatch('change'); };
+  get('mail-advanced').dispatch('click'); choose('work','include'); choose('coupons','exclude');
+  get('mail-search-form').dispatch('submit'); await nextTurn();
+  get('mail-list').querySelector('[data-message-id]').dispatch('click'); await nextTurn();
+  get('mail-advanced').dispatch('click'); choose('work','exclude'); get('mail-search-form').dispatch('submit'); await nextTurn();
+  const cancelled = pending.shift();
+  assert.deepEqual(cancelled.options.body.filters,{excludeLabels:['coupons','work']});
+  get('mail-list').querySelector('.mail-previous-results-bar').querySelector('button').dispatch('click');
+  assert.equal(cancelled.options.signal.aborted,true);
+  cancelled.resolve({messages:[],total:0,totalComplete:true}); await nextTurn();
+  assert.equal(get('mail-list').querySelectorAll('[data-message-id]').length,1,'Cancelled response cannot replace previous results');
+  get('mail-list').querySelector('.mail-cancel-bar').querySelector('button').dispatch('click'); await nextTurn();
+  const retried = pending.shift();
+  assert.deepEqual(retried.options.body.filters,{excludeLabels:['coupons','work']});
+  history.back(); await nextTurn();
+  assert.equal(retried.options.signal.aborted,true);
+  retried.resolve({messages:[],total:0,totalComplete:true}); await nextTurn();
+  assert.equal(panel().querySelector('[data-mail-label-filter="work"]').value,'include');
+  assert.equal(panel().querySelector('[data-mail-label-filter="coupons"]').value,'exclude');
+  assert.match(get('mail-search-summary').textContent,/Include: Work & Administration/u);
+});
+
+for (const [filter,tag,initialTags] of [['include','work',['work']],['exclude','coupons',[]]]) {
+  test(`editing a label refreshes an active ${filter} filter and preserves the reader`, async t => {
+    const {get} = dom(t), calls = [];
+    const message = {id:'message',accountId:'a',subject:'Project update',tags:initialTags,body:'Keep this message open'};
+    const view = createMailView({api:async (path,options) => {
+      if (path === '/api/mail/folders') return {accounts:[{id:'a',connected:true}],folders:[{id:'inbox',accountIds:['a']},{id:`tag:${tag}`} ]};
+      if (path === '/api/mail/message') return {message:{...message,tags:[...message.tags]}};
+      if (path === '/api/mail/tags') {
+        message.tags = options.body.enabled ? [tag] : [];
+        return {tags:[...message.tags],folders:[{id:`tag:${tag}`} ]};
+      }
+      if (path === '/api/mail/list') {
+        calls.push(options.body);
+        const filters = options.body.filters ?? {};
+        const matches = (!filters.includeLabels?.length || filters.includeLabels.some(id => message.tags.includes(id))) && !filters.excludeLabels?.some(id => message.tags.includes(id));
+        return {messages:matches ? [{...message,tags:[...message.tags]}] : [],total:matches ? 1 : 0,totalComplete:true,nextCursor:matches ? 'old-page' : null};
+      }
+      return {};
+    }});
+    view.show(); await nextTurn();
+    get('mail-advanced').dispatch('click');
+    const select = get('mail-advanced-search').querySelector(`[data-mail-label-filter="${tag}"]`); select.value = filter; select.dispatch('change');
+    get('mail-search-form').dispatch('submit'); await nextTurn();
+    get('mail-list').querySelector('[data-message-id]').dispatch('click'); await nextTurn();
+    get('mail-reader-content').querySelector('[aria-label="Labels"]').click();
+    const before = calls.length;
+    get('mail-label-options').querySelectorAll('button').find(node => node.textContent === (tag === 'work' ? 'Work & Administration' : 'Coupons')).dispatch('click'); await nextTurn();
+    assert.equal(calls.length,before + 1,'Label edits requery the filtered list');
+    assert.equal(calls.at(-1).cursor,undefined,'Old pagination is discarded');
+    assert.equal(get('mail-list').querySelectorAll('[data-message-id]').length,0);
+    assert.match(get('mail-list-count').textContent,/0/u);
+    assert.match(get('mail-reader-content').textContent,/Keep this message open/u);
+  });
+}
+
 test('snapshot request criteria, account/folder change clearing, cancel search and retry', async t => {
   const {get} = dom(t);
   const signals = [];

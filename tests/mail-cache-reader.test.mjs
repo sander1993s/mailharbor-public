@@ -370,7 +370,7 @@ test('reader.list with live: true calls provider with live stripped and wraps pr
   cache.close();
 });
 
-test('reader.list with search filter, false filters, scoped[], sort, query, or non-inbox folder bypasses cache to provider', async () => {
+test('reader.list with search filter, reference scopes, sort, query, or non-inbox folder bypasses cache to provider', async () => {
   const cache = await createMailCache(null);
   const account = { id: 'acc-search', email: 'search@example.test', revision: '1' };
 
@@ -407,6 +407,14 @@ test('reader.list with search filter, false filters, scoped[], sort, query, or n
   // Alternate sort
   await adapter.reader.list([account], { sort: 'date_asc' });
   assert.equal(calls.length, 6);
+
+  // Exclusion-only label searches must not accidentally use the unfiltered cache.
+  const excludedReferences = [{ accountId: account.id, path: 'INBOX', uid: 1, uidValidity: '1', fingerprint: 'a'.repeat(64) }];
+  await adapter.reader.list([account], { excludedReferences });
+  assert.equal(calls.length, 7); assert.deepEqual(calls[6].options.excludedReferences, excludedReferences);
+  await adapter.reader.list([account], { excludedReferences: [] });
+  assert.equal(calls.length, 8);
+  await assert.rejects(adapter.reader.list([account], { excludedReferences: {} }), { code: 'invalid_request' });
 
   cache.close();
 });

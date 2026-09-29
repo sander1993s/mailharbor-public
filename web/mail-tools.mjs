@@ -15,6 +15,7 @@ const option = (value, label) => { const node = make('option', label); node.valu
 const provider = folder => folder.type === 'provider' || String(folder.id).startsWith('folder:');
 const folderAccounts = folder => folder.accountIds ?? [];
 const CUSTOM_LABEL = /^tag:custom_/u;
+const copyFilterDraft = filters => Object.fromEntries(Object.entries(filters ?? {}).map(([key,value]) => [key,Array.isArray(value) ? [...value] : String(value)]));
 export const BULK_ACTIONS = Object.freeze([
   ['mark_read','Mark read'], ['mark_unread','Mark unread'], ['star','Star'], ['unstar','Unstar'],
   ['archive','Archive'], ['spam','Mark as spam'], ['not_spam','Not spam'], ['restore','Restore to inbox'],
@@ -31,6 +32,12 @@ export function selectionAccount(messages, ids) {
 /** Optional inputs are omitted; explicit false means read/unstarred/no attachment. Supports KB and MB units. */
 export function buildMailFilters(values) {
   const result = {};
+  for (const key of ['includeLabels','excludeLabels']) {
+    if (values[key] === undefined) continue;
+    if (!Array.isArray(values[key]) || values[key].some(value => typeof value !== 'string')) throw new Error('Choose labels from the filter list.');
+    const ids = [...new Set(values[key].map(value => value.trim()).filter(Boolean))].sort();
+    if (ids.length) result[key] = ids;
+  }
   for (const key of ['from','to','subject','body','since','before']) if (String(values[key] ?? '').trim()) result[key] = String(values[key]).trim();
   for (const key of ['unread','starred','hasAttachment']) if (values[key] === 'true' || values[key] === 'false' || values[key] === true || values[key] === false) result[key] = values[key] === 'true' || values[key] === true;
   for (const key of ['minSize','maxSize']) if (String(values[key] ?? '').trim()) {
@@ -59,11 +66,11 @@ export function buildMailFilters(values) {
   return result;
 }
 
-export function createMailTools({api, describeError, state, refresh, renderList, renderReader, setNotice, openCompose, selectFolder, onSearchSubmit, onSearchClear}) {
+export function createMailTools({api, describeError, state, refresh, renderList, renderReader, setNotice, openCompose, selectFolder, onSearchSubmit, onSearchClear, getLabels}) {
   const telegramSettings = createTelegramSettings({api, describeError});
   let host = null, selectionHost = null, readerHost = null, readerMessage = null, generation = 0, busy = false, confirmation = null;
   let settingsHost = null, advancedButton = null, advancedPanel = null, advancedFirst = null, advancedBinding = null;
-  let undoTokens = [], filterDraft = null, advancedOpen = false, managerOpen = false, notificationsOpen = false, lastShape = '';
+  let undoTokens = [], filterDraft = null, advancedOpen = false, advancedExpanded = false, managerOpen = false, notificationsOpen = false, lastShape = '';
   let notificationState = '', pollTimer = null, polling = false, updateRevision = null, pollGeneration = 0, viewKey = '';
   let providerData = null, providerMessageId = null;
   let providerDialog = null;
@@ -76,10 +83,10 @@ export function createMailTools({api, describeError, state, refresh, renderList,
   const selected = () => state.selection instanceof Set ? state.selection : (state.selection = new Set());
   const accounts = () => (state.accounts ?? []).filter(account => account.connected !== false);
   const providers = accountId => (state.folders ?? []).filter(folder => provider(folder) && folderAccounts(folder).includes(accountId));
-  const labels = () => (state.folders ?? []).filter(folder => String(folder.id).startsWith('tag:'));
+  const labels = () => typeof getLabels === 'function' ? getLabels().map(label => ({...label,id:`tag:${label.id}`})) : (state.folders ?? []).filter(folder => String(folder.id).startsWith('tag:'));
   function drafts() {
     if (!filterDraft) {
-      filterDraft = Object.fromEntries(Object.entries(state.filters ?? {}).map(([key,value]) => [key,String(value)]));
+      filterDraft = copyFilterDraft(state.filters);
       filterDraft.bodySearch = state.bodySearch === true; filterDraft.allFolders = state.folder === 'all'; filterDraft.sort = state.sort ?? 'date_desc';
     }
     return filterDraft;
@@ -101,7 +108,7 @@ export function createMailTools({api, describeError, state, refresh, renderList,
     if ('bodySearch' in overrides) vals.bodySearch = Boolean(overrides.bodySearch);
     if ('allFolders' in overrides) vals.allFolders = Boolean(overrides.allFolders);
     if (overrides.filters) {
-      for (const [k, v] of Object.entries(overrides.filters)) vals[k] = String(v);
+      Object.assign(vals,copyFilterDraft(overrides.filters));
     }
     let validatedFilters;
     try {
@@ -136,8 +143,14 @@ export function createMailTools({api, describeError, state, refresh, renderList,
       allFolders: Boolean(vals.allFolders)
     };
   }
-  function removeCriteria(key) {
+  function removeCriteria(key, labelId) {
     const vals = drafts();
+    if (['includeLabels','excludeLabels'].includes(key) && labelId !== undefined) {
+      vals[key] = (vals[key] ?? []).filter(id => id !== labelId);
+      const result = commitDraft();
+      draw(true);
+      return result;
+    }
     if (key === 'query') {
       state.query = '';
       const mainInput = document.getElementById?.('mail-search');
@@ -181,9 +194,7 @@ export function createMailTools({api, describeError, state, refresh, renderList,
     }
   }
   function restoreCriteria(criteria = {}) {
-    filterDraft = Object.fromEntries(
-      Object.entries(criteria.filters ?? {}).map(([key, value]) => [key, String(value)])
-    );
+    filterDraft = copyFilterDraft(criteria.filters);
     filterDraft.bodySearch = criteria.bodySearch === true;
     filterDraft.allFolders = criteria.allFolders === true;
     filterDraft.sort = criteria.sort ?? 'date_desc';
@@ -283,34 +294,59 @@ export function createMailTools({api, describeError, state, refresh, renderList,
   }
   function advancedFilters() {
     const values = drafts(), detail = make('section',undefined,'mail-advanced-panel'); detail.id = 'mail-advanced-search'; detail.hidden = !advancedOpen;
-    detail.setAttribute('role','region'); detail.setAttribute('aria-label','Advanced search'); advancedPanel = detail;
+    detail.setAttribute('role','region'); detail.setAttribute('aria-label','Filters'); advancedPanel = detail;
     const heading = make('div',undefined,'mail-advanced-heading');
-    heading.append(make('h3','Advanced search'),button('Close',() => closeAdvanced(true)));
+    heading.append(make('h3','Filters'),button('Close',() => closeAdvanced(true)));
     detail.append(heading); detail.addEventListener('keydown',event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation?.(); closeAdvanced(true); } });
-    const form = make('form',undefined,'mail-tools-grid');
+    const form = make('form',undefined,'mail-filter-form');
+    const labelSection = make('fieldset',undefined,'mail-filter-labels');
+    labelSection.append(make('legend','Labels'),make('p','Include matches any selected label. Exclude hides messages with any selected label.','fineprint'));
+    const labelGrid = make('div',undefined,'mail-label-filter-grid');
+    advancedFirst = null;
+    for (const label of labels()) {
+      const id = label.id.slice(4);
+      const selectedValue = values.excludeLabels?.includes(id) ? 'exclude' : values.includeLabels?.includes(id) ? 'include' : '';
+      const control = selectControl(label.label,[['','Any'],['include','Include'],['exclude','Exclude']],selectedValue,value => {
+        for (const key of ['includeLabels','excludeLabels']) values[key] = (values[key] ?? []).filter(current => current !== id);
+        if (value) values[value === 'include' ? 'includeLabels' : 'excludeLabels'].push(id);
+      },'mail-label-filter');
+      control.node.setAttribute('aria-label',`${label.label} label filter`);
+      control.node.setAttribute('data-mail-label-filter',id);
+      if (!advancedFirst) advancedFirst = control.node;
+      labelGrid.append(control.wrapper);
+    }
+    if (!labelGrid.children.length) labelGrid.append(make('p','No labels available.','fineprint'));
+    labelSection.append(labelGrid); form.append(labelSection);
+    const advanced = make('details',undefined,'mail-tools-details mail-filter-advanced'); advanced.open = advancedExpanded;
+    const summary = make('summary','Advanced search'); advanced.append(summary);
+    if (!advancedFirst) advancedFirst = summary;
+    advanced.addEventListener('toggle',() => { if (advanced.isConnected !== false) advancedExpanded = advanced.open; });
+    const fields = make('div',undefined,'mail-tools-grid');
     for (const [key,label,type] of [['from','From'],['to','To'],['subject','Subject'],['body','Body contains'],['since','Since (inclusive)','date'],['before','Before (exclusive)','date']]) {
       const field = inputControl(label,values[key],value => { values[key] = value; },type ?? 'text');
-      if (key === 'from') advancedFirst = field.node;
-      form.append(field.wrapper);
+      fields.append(field.wrapper);
     }
     for (const [key,label] of [['minSize','Minimum size'],['maxSize','Maximum size']]) {
       const field = inputControl(label,values[key],value => { values[key] = value; },'number');
       const unit = selectControl(`${label} unit`,[['Bytes','Bytes'],['KB','KB'],['MB','MB']],values[`${key}Unit`] || 'Bytes',value => { values[`${key}Unit`] = value; });
       const group = make('div', undefined, 'mail-size-field');
       group.append(field.wrapper, unit.wrapper);
-      form.append(group);
+      fields.append(group);
     }
     for (const [key,label,yes,no] of [['unread','Read state','Unread','Read'],['starred','Star state','Starred','Unstarred'],['hasAttachment','Attachments','Has attachments','No attachments']]) {
-      form.append(selectControl(label,[['','Any'],['true',yes],['false',no]],values[key],value => { values[key] = value; }).wrapper);
+      fields.append(selectControl(label,[['','Any'],['true',yes],['false',no]],values[key],value => { values[key] = value; }).wrapper);
     }
-    form.append(selectControl('Sort',[['date_desc','Newest first'],['date_asc','Oldest first'],['subject_asc','Subject A–Z'],['sender_asc','Sender A–Z']],values.sort,value => { values.sort = value; }).wrapper);
-    form.append(checkbox('Search message bodies with the main search',values.bodySearch,value => { values.bodySearch = value; }).wrapper,
+    fields.append(selectControl('Sort',[['date_desc','Newest first'],['date_asc','Oldest first'],['subject_asc','Subject A–Z'],['sender_asc','Sender A–Z']],values.sort,value => { values.sort = value; }).wrapper);
+    fields.append(checkbox('Search message bodies with the main search',values.bodySearch,value => { values.bodySearch = value; }).wrapper,
       checkbox('Search all provider folders',values.allFolders,value => { values.allFolders = value; }).wrapper,
       checkbox('Group conversations',state.threaded === true,value => { state.threaded = value; renderList?.(); renderReader?.(); }).wrapper);
-    const submit = make('button','Search'); submit.type = 'submit'; form.append(submit);
-    form.append(button('Clear', () => {
+    advanced.append(fields); form.append(advanced);
+    const actions = make('div',undefined,'mail-tools-row mail-filter-actions');
+    const submit = make('button','Apply filters'); submit.type = 'submit'; actions.append(submit);
+    actions.append(button('Clear', () => {
       clearFilters();
     }));
+    form.append(actions);
     form.addEventListener('submit', event => {
       event.preventDefault();
       try {
@@ -702,7 +738,7 @@ export function createMailTools({api, describeError, state, refresh, renderList,
     start() { if (!polling) { polling = true; schedule(); } },
     stop,
     reset() { stop(); telegramSettings.reset(); closeAdvanced(); closeProviderDialog(); bindAdvanced(null); advancedPanel?.remove?.(); selectionHost?.replaceChildren(); selectionHost = null; settingsHost?.replaceChildren(); host?.replaceChildren(); settingsHost = null; advancedPanel = null; advancedFirst = null;
-      generation++; busy = false; confirmation = null; undoTokens = []; filterDraft = null; providerData = null; providerMessageId = null; readerMessage = null; readerHost = null; host = null; lastShape = ''; viewKey = ''; notificationState = ''; advancedOpen = false; managerOpen = false; notificationsOpen = false;
+      generation++; busy = false; confirmation = null; undoTokens = []; filterDraft = null; providerData = null; providerMessageId = null; readerMessage = null; readerHost = null; host = null; lastShape = ''; viewKey = ''; notificationState = ''; advancedOpen = false; advancedExpanded = false; managerOpen = false; notificationsOpen = false;
       labelSync = null; labelSyncBusy = false; labelSyncError = ''; labelSyncControls = null; labelSyncAction = false;
       cacheSettings = null; cacheBusy = false; cacheError = ''; cacheOpen = false;
       Object.assign(manager,{kind:'folder',accountId:'',action:'create',id:'',name:'',parentId:''}); Object.assign(bulk,{action:'mark_read',destinationId:'',tag:''}); }

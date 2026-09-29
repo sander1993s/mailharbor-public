@@ -1,5 +1,5 @@
 import { MAX_ACCOUNTS } from './providers.mjs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { MailHarborError, safeError } from './validation.mjs';
 import { MAIL_TAGS } from './mail-tags.mjs';
 import { generateAppointmentIcs } from './mail-calendar.mjs';
@@ -15,6 +15,10 @@ const MOVES = new Set(['delete', 'archive', 'move', 'restore', 'spam', 'not_spam
 const providerFolder = value => typeof value === 'string' && /^folder:[a-f0-9]{64}$/u.test(value);
 const fail = code => { throw new MailHarborError(code); };
 const token = () => randomBytes(24).toString('base64url');
+const labelScopeIdentity = scope => createHash('sha256').update(JSON.stringify(
+  ['scopedReferences', 'excludedReferences'].map(key => scope[key] === undefined ? null :
+    [...new Set(scope[key].map(reference => JSON.stringify([reference.accountId, reference.fingerprint])))].sort())
+)).digest('hex');
 const validId = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id);
 const validUid = uid => Number.isSafeInteger(uid) && uid > 0 && uid <= 0xffffffff;
 const BASE_MESSAGE_KEYS = [
@@ -265,15 +269,23 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
       if (input.live !== undefined && typeof input.live !== 'boolean') fail('invalid_request');
       const live = input.live === true;
       const filters = input.filters ?? {};
-      object(filters, ['from', 'to', 'subject', 'body', 'since', 'before', 'unread', 'starred', 'hasAttachment', 'minSize', 'maxSize']);
+      object(filters, ['from', 'to', 'subject', 'body', 'since', 'before', 'unread', 'starred', 'hasAttachment', 'minSize', 'maxSize', 'includeLabels', 'excludeLabels']);
+      const availableLabels = new Set(tagDefinitions().map(label => label.id));
       for (const [key, value] of Object.entries(filters)) {
-        if (['unread', 'starred', 'hasAttachment'].includes(key)) { if (typeof value !== 'boolean') fail('invalid_request'); }
+        if (['includeLabels', 'excludeLabels'].includes(key)) {
+          if (!Array.isArray(value) || value.length > availableLabels.size || new Set(value).size !== value.length) fail('invalid_request');
+          for (const id of value) if (typeof id !== 'string' || !availableLabels.has(id)) fail('invalid_request');
+        } else if (['unread', 'starred', 'hasAttachment'].includes(key)) { if (typeof value !== 'boolean') fail('invalid_request'); }
         else if (['minSize', 'maxSize'].includes(key)) { if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) fail('invalid_request'); }
         else if (typeof value !== 'string' || value.length > 200 || /[\x00-\x1f\x7f]/u.test(value)) fail('invalid_request');
         else if (['since', 'before'].includes(key) && (!/^\d{4}-\d{2}-\d{2}$/u.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value)) fail('invalid_request');
       }
       if ((filters.minSize != null && filters.maxSize != null && filters.minSize > filters.maxSize) ||
         (filters.since && filters.before && filters.since >= filters.before)) fail('invalid_request');
+      const { includeLabels = [], excludeLabels = [], ...providerFilters } = filters;
+      const labelFiltering = includeLabels.length > 0 || excludeLabels.length > 0;
+      const matchesLabels = entry => (!includeLabels.length || includeLabels.some(id => entry.message.tags.includes(id))) &&
+        !excludeLabels.some(id => entry.message.tags.includes(id));
       const view = JSON.stringify([input.sort ?? 'date_desc', input.bodySearch ?? false, live, Object.fromEntries(Object.entries(filters).sort(([a], [b]) => a.localeCompare(b)))]);
       if (input.cursor !== undefined && input.cursor !== null && (typeof input.cursor !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(input.cursor))) fail('invalid_request');
       if (signal?.aborted) fail('cancelled');
@@ -289,15 +301,15 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
         state = structuredClone(page.state);
       }
       if (!current.length) return { folder: input.folder, messages: [], nextCursor: null, errors: [], total: 0, totalComplete: true };
-      let data;
+      let data, verifyLabelScope = () => {};
       if (tag) {
-        const labelVersion = tags?.version() ?? 0, advanced = Object.keys(filters).length > 0 || input.bodySearch;
+        const labelVersion = tags?.version() ?? 0, advanced = Object.keys(providerFilters).length > 0 || input.bodySearch;
         if (state && (state.kind !== (advanced ? 'tag-search' : 'tag') || state.version !== labelVersion ||
           (!advanced && (!Number.isSafeInteger(state.offset) || state.offset < 0)))) fail('stale_message');
-        const entries = tags?.entries(current, { tag: tag.id, query: advanced ? '' : query }) ?? [];
+        const entries = (tags?.entries(current, { tag: tag.id, query: advanced ? '' : query }) ?? []).filter(matchesLabels);
         if (advanced) {
           data = await run(current, async opSignal => {
-            const result = entries.length ? await reader.list(current, { folder: 'all', query, filters, bodySearch: input.bodySearch ?? false,
+            const result = entries.length ? await reader.list(current, { folder: 'all', query, filters: providerFilters, bodySearch: input.bodySearch ?? false,
               sort: input.sort ?? 'date_desc', cursor: state?.reader ?? null, limit: 50, scopedReferences: entries.map(entry => entry.reference), signal: opSignal, live, includeAttachments: true }) :
               { messages: [], total: 0, totalComplete: true, errors: [], nextCursor: null };
             if (labelVersion !== tags?.version()) fail('stale_message');
@@ -313,7 +325,7 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
               if (version !== deletionVersion || labelVersion !== tags.version()) fail('stale_message');
               unchanged(versions(current));
             } });
-            if (observed?.changed === false && labelVersion !== tags?.version()) fail('stale_message');
+            if ((observed?.version ?? labelVersion) !== (tags?.version() ?? 0)) fail('stale_message');
             if (version !== deletionVersion) fail('stale_message');
             return { ...result, messages: matched, nextCursor: result.nextCursor ? { kind: 'tag-search', version: tags?.version() ?? 0, reader: result.nextCursor } : null };
           }, signal);
@@ -326,18 +338,41 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
             errors: [], total: entries.length, totalComplete: true };
         }
       } else {
+        const currentLabelScope = () => {
+          const entries = tags?.entries(current) ?? [];
+          return {
+            ...(includeLabels.length ? { scopedReferences: entries.filter(matchesLabels).map(entry => entry.reference) } : {}),
+            ...(excludeLabels.length ? { excludedReferences: entries.filter(entry => excludeLabels.some(id => entry.message.tags.includes(id))).map(entry => entry.reference) } : {})
+          };
+        };
+        let checkedLabelVersion = tags?.version() ?? 0;
+        const labelScope = labelFiltering ? currentLabelScope() : {};
+        const labelIdentity = labelFiltering ? labelScopeIdentity(labelScope) : null;
+        if (labelFiltering && state && (state.kind !== 'label-search' || state.scope !== labelIdentity)) fail('stale_message');
+        verifyLabelScope = () => {
+          if (!labelFiltering || checkedLabelVersion === (tags?.version() ?? 0)) return;
+          // Read/star flags and refreshed metadata change the store version, but not label membership.
+          if (labelScopeIdentity(currentLabelScope()) !== labelIdentity) fail('stale_message');
+          checkedLabelVersion = tags?.version() ?? 0;
+        };
         data = await run(current, async opSignal => {
-          const result = await reader.list(current, { folder: input.folder, query, cursor: state, limit: 50, signal: opSignal, filters, sort: input.sort ?? 'date_desc', bodySearch: input.bodySearch ?? false, live, includeAttachments: true });
+          const result = labelScope.scopedReferences?.length === 0 ? { messages: [], total: 0, totalComplete: true, errors: [], nextCursor: null } :
+            await reader.list(current, { folder: input.folder, query, cursor: labelFiltering ? state?.reader ?? null : state, limit: 50, signal: opSignal,
+              filters: providerFilters, sort: input.sort ?? 'date_desc', bodySearch: input.bodySearch ?? false, live, includeAttachments: true, ...labelScope });
           if (opSignal.aborted) throw opSignal.reason;
+          verifyLabelScope();
           await tags?.observe(current, result.messages, { verify: () => {
             if (opSignal.aborted) throw opSignal.reason;
             if (version !== deletionVersion) fail('stale_message');
+            verifyLabelScope();
             unchanged(versions(current));
           } });
-          return result;
+          verifyLabelScope();
+          return labelFiltering ? { ...result, nextCursor: result.nextCursor ? { kind: 'label-search', scope: labelIdentity, reader: result.nextCursor } : null } : result;
         }, signal);
       }
       if (version !== deletionVersion) fail('stale_message');
+      verifyLabelScope();
       const labels = tags?.tagsForMany(current, data.messages);
       const messages = data.messages.map((value, index) => remember(value, current, labels?.[index]));
       let nextCursor = null;
