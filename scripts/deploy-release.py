@@ -368,6 +368,125 @@ def discard_verified_restore_copy(directory):
     directory.rmdir()
 
 
+
+def backup_source_manifest(project):
+    project = checked(project)
+    require(project.is_dir(), "Missing backup source directory")
+    files = {}
+    for source in project.rglob("*"):
+        name = source.relative_to(project).as_posix()
+        if allowed_name(name) and (source.is_file() or source.is_symlink()):
+            checked(source, project)
+            require(source.is_file() and not source.is_symlink() and source.stat().st_nlink == 1, "Linked backup source")
+            files[name] = file_hash(source)
+    return {"schema": 1, "files": files}
+
+
+def write_backup_source_manifest(backup_directory):
+    """Mark the exact old source only after its replacement starts successfully."""
+    backup_directory = checked(backup_directory)
+    manifest = backup_source_manifest(checked(backup_directory / "project", backup_directory))
+    target = checked(backup_directory / "project-manifest.json", backup_directory)
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(manifest, output, sort_keys=True)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def backup_retention_plan(backup_directory, keep=2):
+    """Inspect complete recovery sets; preserve unknown or damaged entries."""
+    require(keep == 2, "Backup retention is fixed at two complete recovery sets")
+    backup_directory = checked(Path(backup_directory))
+    require(backup_directory.name == "backups" and backup_directory.is_dir(), "Invalid backup retention root")
+    complete, preserved = [], []
+    for directory in sorted(backup_directory.iterdir()):
+        try:
+            require(not directory.is_symlink() and directory.is_dir(), "Unsupported backup entry")
+            checked(directory, backup_directory)
+            release_id = directory.name.removesuffix("-previous")
+            require(directory.name == release_id + "-previous" and RELEASE_RE.fullmatch(release_id), "Unrecognized backup name")
+            stamp = release_id.split("-", 1)[0]
+            require(time.strftime("%Y%m%dT%H%M%SZ", time.strptime(stamp, "%Y%m%dT%H%M%SZ")) == stamp, "Invalid backup timestamp")
+            entries = {p.name for p in directory.iterdir()}
+            require({"project", "state"} <= entries <= {"project", "state", "config.json", "project-manifest.json"}, "Incomplete or unrecognized recovery set")
+            if "config.json" in entries:
+                config_backup = checked(directory / "config.json", directory)
+                require(config_backup.is_file() and not config_backup.is_symlink() and config_backup.stat().st_nlink == 1, "Linked backup configuration")
+            project, state = checked(directory / "project", directory), checked(directory / "state", directory)
+            require(project.is_dir() and state.is_dir(), "Missing backup project or state")
+            for name in ("package.json", "package-lock.json", "server/main.mjs", "server/account-store.mjs", "server/mail-index.mjs", "scripts/verify-state-backup.mjs"):
+                source = checked(project / name, project)
+                require(source.is_file() and not source.is_symlink(), "Incomplete backup project")
+            require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", json.loads((project / "package.json").read_text())["version"]), "Invalid backup project version")
+            if "project-manifest.json" in entries:
+                source_manifest = checked(directory / "project-manifest.json", directory)
+                require(source_manifest.is_file() and not source_manifest.is_symlink() and source_manifest.stat().st_nlink == 1, "Linked backup source manifest")
+                require(json.loads(source_manifest.read_text()) == backup_source_manifest(project), "Backup source inventory or checksum mismatch")
+            manifest_path = checked(state / "backup-manifest.json", state)
+            manifest = json.loads(manifest_path.read_text())
+            require(manifest.get("schema") in (1, 2), "Invalid backup state schema")
+            expected = {"accounts.key", "accounts.enc", "mail-index.sqlite"}
+            if manifest["schema"] == 2:
+                require(type(manifest.get("notificationsPresent")) is bool, "Invalid backup notification inventory")
+                if manifest["notificationsPresent"]:
+                    expected.add("notification-state.sqlite")
+            require(set(manifest.get("files", {})) == expected, "Invalid backup state inventory")
+            require({p.name for p in state.iterdir()} == expected | {"backup-manifest.json"}, "Unexpected backup state entries")
+            for name, digest in manifest["files"].items():
+                source = checked(state / name, state)
+                require(source.is_file() and not source.is_symlink() and source.stat().st_nlink == 1, "Linked backup state")
+                require(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest) and file_hash(source) == digest, "Backup state checksum mismatch")
+            require((state / "accounts.key").stat().st_size == 32, "Invalid backup key size")
+            complete.append(directory.name)
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError):
+            preserved.append(directory.name)
+    complete.sort(reverse=True)
+    return {"keep": keep, "retained": complete[:keep], "remove": complete[keep:], "preserved": preserved}
+
+
+def backup_removal_inventory(directory, backup_directory):
+    """Validate the whole deletion first, without following package symlinks."""
+    import stat
+    directory = checked(directory, backup_directory)
+    entries = []
+    def visit(target):
+        info = target.lstat()
+        require(not getattr(target, "is_junction", lambda: False)(), "Junction in backup cleanup")
+        require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode), "Unsupported backup filesystem entry")
+        if stat.S_ISDIR(info.st_mode):
+            checked(target)
+            for child in sorted(target.iterdir()):
+                visit(child)
+        entries.append((target, info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)))
+    visit(directory)
+    return entries
+
+
+def prune_backups(backup_directory, keep=2, dry_run=False):
+    """Keep the newest two complete sets; a failed cleanup never rolls back code."""
+    import stat
+    backup_directory = checked(Path(backup_directory))
+    plan = backup_retention_plan(backup_directory, keep)
+    inventories = [backup_removal_inventory(backup_directory / name, backup_directory) for name in plan["remove"]]
+    report = {**plan, "removed": [], "dryRun": bool(dry_run)}
+    if dry_run:
+        return report
+    # Verify retained state again immediately before deleting any older recovery set.
+    require(backup_retention_plan(backup_directory, keep) == plan, "Backup inventory changed during retention check")
+    for name, entries in zip(plan["remove"], inventories):
+        for target, device, inode, kind in entries:
+            checked(target.parent)
+            info = target.lstat()
+            require((info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)) == (device, inode, kind), "Backup entry changed during cleanup")
+            if stat.S_ISDIR(info.st_mode):
+                target.rmdir()
+            else:
+                target.unlink()
+        report["removed"].append(name)
+    return report
+
+
 def remote_deploy(release_id, archive_sha):
     require(sys.platform == "linux" and os.getuid() != 0, "Deploy as the existing non-root Linux user")
     require(checked(Path.home()) == checked(DEPLOY_HOME) and DEPLOY_HOME.stat().st_uid == os.getuid(), "Unexpected deployment user or home")
@@ -475,6 +594,12 @@ def remote_deploy(release_id, archive_sha):
             except BaseException:
                 print("ROLLBACK NEEDS ATTENTION: inspect the preserved project/backup paths and mailharbor.service.", file=sys.stderr)
         raise
+    # Activation has succeeded. Retention failure must not roll back a healthy service.
+    try:
+        write_backup_source_manifest(backup_root)
+        print(json.dumps({"backupRetention": prune_backups(STATE / "backups")}), flush=True)
+    except Exception:
+        print(json.dumps({"backupRetention": {"cleanupPending": True, "keep": 2}}), flush=True)
 
 
 def local_main():

@@ -34,6 +34,8 @@ Before an update, stop the service and make a private backup of configuration, t
 
 After an update, verify the process, authenticated UI, state compatibility, and selected provider operations. Monitor sanitized failure codes and storage use without publishing mail-derived details. Record operational evidence privately outside the source tree.
 
+After a successful deployment, the helper retains the two newest verified deployment backups and removes older complete backups. Cleanup validates the backup paths and state checksums, preserves both retained recovery copies, and does not run on a failed deployment. Unexpected or incomplete backup entries require inspection instead of being silently removed.
+
 Restoring code or a database does not undo mail already sent, moved, or deleted. Older code may not understand newer owner decisions, retry metadata, or journals; keep automatic processing paused until compatibility is established. Disposable browsing cache can be rebuilt separately; do not discard durable organizer state or encryption keys.
 
 To stop MailHarbor, use `systemctl --user stop mailharbor.service`. Remove only the corresponding Tailscale Serve mapping when retiring access. Revoke provider grants and app passwords when decommissioning the installation.
