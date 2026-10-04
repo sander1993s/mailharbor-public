@@ -660,6 +660,132 @@ test('retention batches read flags across records and checkpoints each bounded M
   assert.equal(result.counts.trashed, 65);
 });
 
+test('conflicting cached fingerprints use ordered MOVE batches and save each changed or absent outcome before classification continues', async t => {
+  for (const liveFirst of [false, true]) {
+    const index = memoryIndex(), batches = [], attempted = [];
+    const messages = Array.from({ length: 6 }, (_, offset) => mail(offset + 1, { unread: false }))
+      .sort((left, right) => keyOf(left).localeCompare(keyOf(right)));
+    messages.forEach((message, offset) => { message.reference.uid = [1, 2, 1, 3, 4, 5][offset]; seed(index, message, classification('placeholder')); });
+    const live = messages[liveFirst ? 0 : 2], conflict = messages[liveFirst ? 2 : 0];
+    const source = new Map(messages.filter(message => message !== conflict).map(message => [message.reference.uid, message.reference.fingerprint]));
+    source.set(50, mail(50).reference.fingerprint);
+    const h = harness(t, { index, messages: [mail(50)], readerOverrides: {
+      async moveBatch(_, operations, { onResult, verify }) {
+        if (new Set(operations.map(operation => operation.reference.uid)).size !== operations.length) throw new MailHarborError('invalid_request');
+        batches.push(operations.map(operation => operation.reference.fingerprint));
+        for (const operation of operations) {
+          verify();
+          const key = keyOf({ reference: operation.reference }), current = source.get(operation.reference.uid);
+          assert.equal(index.get('messages', key).locations[0].intent.action, 'trash');
+          const status = !current ? 'absent' : current !== operation.reference.fingerprint ? 'changed' : 'applied';
+          if (status === 'applied') source.delete(operation.reference.uid);
+          await onResult({ ...operation, result: { status, ...(status === 'applied' ? {
+            reference: { ...operation.reference, path: 'Trash', uid: operation.reference.uid + 1000 }
+          } : {}) } });
+          const saved = index.get('messages', key);
+          assert.equal(saved.locations[0].handled, status === 'applied' ? 'trash' : status);
+          assert.equal(saved.locations[0].intent, null);
+          attempted.push(operation.reference.fingerprint);
+        }
+      }
+    } });
+    const result = await h.run();
+    assert.equal(result.lastRun.status, 'completed');
+    assert.deepEqual(batches.slice(0, 2), [messages.slice(0, 2), messages.slice(2)].map(batch => batch.map(message => message.reference.fingerprint)));
+    assert.deepEqual(attempted.slice(0, 6), messages.map(message => message.reference.fingerprint));
+    assert.equal(index.get('messages', keyOf(live)).locations[0].handled, 'trash');
+    const stale = index.get('messages', keyOf(conflict));
+    assert.equal(stale.locations[0].handled, liveFirst ? 'absent' : 'changed');
+    assert.deepEqual(stale.reference, conflict.reference); assert.equal(stale.review, true);
+    assert.equal(result.counts.trashed, 6);
+    assert.equal(h.metrics.model.flatMap(request => request.messages).length, 1);
+    await h.processing.close();
+  }
+});
+
+test('conflicting cached fingerprints split flag and body batches and only the current message is classified', async t => {
+  const index = memoryIndex(), flags = [], bodies = [];
+  const messages = [mail(1), mail(2)].sort((left, right) => keyOf(left).localeCompare(keyOf(right)));
+  messages[1].reference.uid = messages[0].reference.uid;
+  for (const message of messages) seed(index, message, null);
+  const [stale, current] = messages;
+  const h = harness(t, { index, messages: [], folders: [], readerOverrides: {
+    async markRead(_, references) {
+      if (new Set(references.map(reference => reference.uid)).size !== references.length) throw new MailHarborError('invalid_request');
+      flags.push(...references.map(reference => reference.fingerprint));
+      return { results: references.map(reference => ({ reference, status: reference.fingerprint === current.reference.fingerprint ? 'applied' : 'changed' })) };
+    },
+    async readBatch(_, references) {
+      if (new Set(references.map(reference => reference.uid)).size !== references.length) throw new MailHarborError('invalid_request');
+      bodies.push(...references.map(reference => reference.fingerprint));
+      return { messages: references.filter(reference => reference.fingerprint === current.reference.fingerprint).map(reference => ({ ...current,
+        reference, body: 'A complete job notification body.', truncated: false, bodyUnavailable: false })),
+      errors: references.filter(reference => reference.fingerprint !== current.reference.fingerprint).map(reference => ({ reference, code: 'stale_message' })) };
+    }
+  } });
+  const result = await h.run();
+  assert.equal(result.lastRun.status, 'partial');
+  assert.deepEqual(flags.slice(0, 2), messages.map(message => message.reference.fingerprint));
+  assert.deepEqual(bodies, messages.map(message => message.reference.fingerprint));
+  const savedStale = index.get('messages', keyOf(stale)), savedCurrent = index.get('messages', keyOf(current));
+  assert.equal(savedStale.locations[0].read, false); assert.equal(savedStale.locations[0].handled, 'changed');
+  assert.equal(savedStale.classification, null); assert.equal(savedStale.readError, 'stale_message');
+  assert.equal(savedCurrent.locations[0].read, true); assert.equal(savedCurrent.locations[0].handled, 'trash');
+  assert.deepEqual(h.metrics.model.flatMap(request => request.messages.map(message => message.id)), [keyOf(current)]);
+  assert.equal(result.counts.markedRead, 1); assert.equal(result.counts.trashed, 1);
+});
+
+test('conflicting MOVE batches respect the persisted pilot cap without dropping or journaling unissued records', async t => {
+  const index = memoryIndex(), attempted = [];
+  const messages = [mail(1), mail(2), mail(3)].sort((left, right) => keyOf(left).localeCompare(keyOf(right)));
+  for (const message of messages) { message.reference.uid = 1; message.unread = false; seed(index, message, classification('placeholder')); }
+  const h = harness(t, { index, messages: [], folders: [], readerOverrides: {
+    async moveBatch(_, operations, { onResult }) {
+      if (new Set(operations.map(operation => operation.reference.uid)).size !== operations.length) throw new MailHarborError('invalid_request');
+      for (const operation of operations) {
+        attempted.push(operation.reference.fingerprint);
+        await onResult({ ...operation, result: { status: 'changed' } });
+      }
+    }
+  } });
+  await h.processing.configure({ maxActions: 2 });
+  const result = await h.run();
+  assert.equal(result.pauseReason, 'pilot_complete');
+  assert.equal(result.pilot.actionAttempts, 2);
+  assert.deepEqual(attempted, messages.slice(0, 2).map(message => message.reference.fingerprint));
+  assert.equal(index.get('messages', keyOf(messages[2])).locations[0].intent, undefined);
+  assert.equal(index.get('messages', keyOf(messages[2])).locations[0].handled, null);
+  await h.processing.close();
+  const resumed = harness(t, { index, messages: [], folders: [] });
+  await resumed.run();
+  assert.equal(resumed.metrics.moves.length, 0);
+  assert.equal(index.get('meta', 'processingSettings').pilotCounters.actionAttempts, 2);
+});
+
+test('cancellation between conflicting MOVE batches preserves the first result and leaves later records unissued', async t => {
+  const index = memoryIndex(), attempted = [];
+  const messages = [mail(1), mail(2)].sort((left, right) => keyOf(left).localeCompare(keyOf(right)));
+  for (const message of messages) { message.reference.uid = 1; message.unread = false; seed(index, message, classification('placeholder')); }
+  let h, paused;
+  h = harness(t, { index, messages: [], folders: [], readerOverrides: {
+    async moveBatch(_, operations, { onResult }) {
+      if (new Set(operations.map(operation => operation.reference.uid)).size !== operations.length) throw new MailHarborError('invalid_request');
+      for (const operation of operations) {
+        attempted.push(operation.reference.fingerprint);
+        await onResult({ ...operation, result: { status: 'changed' } });
+      }
+      paused = h.processing.action('pause');
+    }
+  } });
+  const result = await h.run(); await paused;
+  assert.equal(result.lastRun.status, 'paused');
+  assert.deepEqual(attempted, [messages[0].reference.fingerprint]);
+  assert.equal(index.get('messages', keyOf(messages[0])).locations[0].handled, 'changed');
+  assert.equal(index.get('messages', keyOf(messages[0])).locations[0].intent, null);
+  assert.equal(index.get('messages', keyOf(messages[1])).locations[0].intent, undefined);
+  assert.equal(index.get('messages', keyOf(messages[1])).locations[0].handled, null);
+});
+
 test('partial batch failure preserves completed results and outstanding intents for restart without reclassification', async t => {
   const index = memoryIndex();
   for (let uid = 1; uid <= 65; uid++) seed(index, mail(uid, { unread: false }), classification('placeholder'));

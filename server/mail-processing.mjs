@@ -18,6 +18,21 @@ const POLICY_LABELS = new Set(MAIL_CATEGORIES.map(category => category.id));
 const email = account => account.email.trim().normalize('NFC').toLowerCase();
 const messageKey = (account, reference) => hash([account.id, email(account), reference.fingerprint]);
 const locationKey = reference => hash([reference.path, reference.uidValidity, reference.uid]);
+function* referenceBatches(entries, limit, referenceOf) {
+  let batch = [], sources = new Set();
+  for (const entry of entries) {
+    const source = locationKey(referenceOf(entry));
+    // Cached fingerprints can disagree about one physical mailbox message. Keep
+    // every record, in order, but let the reader verify each conflicting claim
+    // in a separate batch so neither request validation nor result routing loses it.
+    if (batch.length === limit || sources.has(source)) {
+      yield batch;
+      batch = []; sources = new Set();
+    }
+    batch.push(entry); sources.add(source);
+  }
+  if (batch.length) yield batch;
+}
 const gmailIdentity = location => location.gmail === true && typeof location.emailId === 'string' && /^\d{1,20}$/.test(location.emailId) ? location.emailId : null;
 const matchingAliases = (record, location) => {
   const identity = gmailIdentity(location);
@@ -260,9 +275,8 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       if (!groups.has(id)) groups.set(id, []);
       groups.get(id).push({ record, location });
     }
-    for (const entries of groups.values()) for (let offset = 0; offset < entries.length; offset += 100) {
+    for (const entries of groups.values()) for (const batch of referenceBatches(entries, 100, entry => entry.location.reference)) {
       if (ownerMutation) return;
-      const batch = entries.slice(offset, offset + 100);
       progress('marking_read', account);
       let result;
       try { result = await timed('read_flags', () => reader.markRead(account, batch.map(value => value.location.reference), { signal: signal(), verify: () => verify(account) })); }
@@ -367,7 +381,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       if (!groups.has(id)) groups.set(id, { account, records: [] }); groups.get(id).records.push(record);
     }
     const inputs = [], ready = new Map();
-    for (const { account, records } of groups.values()) {
+    for (const { account, records: grouped } of groups.values()) for (const records of referenceBatches(grouped, 40, record => record.reference)) {
       await markLocations(account, records);
       if (!accountReady(account)) continue;
       progress('reading', account);
@@ -628,9 +642,9 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
     }
   }
   async function moveEntries(account, entries) {
-    for (let offset = 0; offset < entries.length; offset += 40) {
+    for (const batch of referenceBatches(entries, 40, entry => entry.location.reference)) {
       if (ownerMutation) return;
-      const batch = entries.slice(offset, offset + 40), expected = new Map(batch.map(entry => [locationKey(entry.location.reference), entry]));
+      const expected = new Map(batch.map(entry => [locationKey(entry.location.reference), entry]));
       if (settings.maxActions != null && (settings.pilotCounters?.actionAttempts ?? 0) + batch.length > settings.maxActions) {
         const available = Math.max(0, settings.maxActions - (settings.pilotCounters?.actionAttempts ?? 0));
         if (available) await moveEntries(account, batch.slice(0, available));

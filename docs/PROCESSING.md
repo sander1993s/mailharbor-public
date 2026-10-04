@@ -1,5 +1,7 @@
 # Mail organization and retention
 
+Conflicting cached fingerprints can reference the same physical mailbox location. The organizer keeps those references in separate bounded flag, body-read, and move batches, preserving input order and validating each fingerprint independently. Every record retains its own result and move journal; a stale reference cannot authorize an action on a different message.
+
 Version 0.7.1 uses classifier version 3 with prompt/schema version 2. The provider transport accepts an exact whole-response bare or JSON code fence and correctly typed empty optional tool metadata. It still rejects extra prose, nonempty/malformed tool metadata, tool/permission events and invalid response schemas. Failed results receive a bounded retry budget for the new classifier; successful cached classifications are preserved.
 
 MailHarbor's optional organizer discovers mail across connected accounts, marks messages read, saves one classification per logical message, applies shared labels, and checks when an archive or Trash action becomes due. It runs on the homeserver after the browser closes. It uses the separately configured Gemini worker; ordinary browsing and local invoice extraction do not require a model call.

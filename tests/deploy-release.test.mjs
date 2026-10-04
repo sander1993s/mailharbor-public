@@ -356,3 +356,116 @@ print('paused preflight verified')
 `;
   const result = py(code, [config]); assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /paused preflight verified/);
 });
+
+
+const retentionNames = [
+  '20260101T010000Z-0.8.6-11111111-previous',
+  '20260102T010000Z-0.8.7-22222222-previous',
+  '20260103T010000Z-0.8.8-33333333-previous',
+  '20260104T010000Z-0.8.9-44444444-previous'
+];
+async function retentionFixture(t, count = 4) {
+  const value = await fixture(t), backups = path.join(value.root, 'backups');
+  await mkdir(backups);
+  for (const name of retentionNames.slice(0, count)) {
+    const directory = path.join(backups, name), project = path.join(directory, 'project');
+    await mkdir(project, {recursive: true});
+    for (const relative of ['package.json', 'package-lock.json', 'server/main.mjs', 'server/account-store.mjs', 'server/mail-index.mjs', 'scripts/verify-state-backup.mjs']) {
+      await mkdir(path.dirname(path.join(project, relative)), {recursive: true});
+      await writeFile(path.join(project, relative), relative === 'package.json' ? '{"version":"0.8.8"}' : 'synthetic source');
+    }
+    backupState(value.state, path.join(directory, 'state'));
+  }
+  return {...value, backups};
+}
+function retention(backups, dryRun = false) {
+  return py('print(json.dumps(d.prune_backups(pathlib.Path(sys.argv[2]),dry_run=sys.argv[3]=="true")))', [backups, String(dryRun)]);
+}
+
+test('backup retention previews without mutation and keeps the newest two complete sets by release timestamp', async t => {
+  const {backups} = await retentionFixture(t);
+  const {utimes} = await import('node:fs/promises');
+  // Copying an old recovery set must not make it displace a newer one.
+  await utimes(path.join(backups, retentionNames[0]), new Date('2030-01-01'), new Date('2030-01-01'));
+  const preview = retention(backups, true); assert.equal(preview.status, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).retained, retentionNames.slice(2).reverse());
+  assert.deepEqual(JSON.parse(preview.stdout).remove, retentionNames.slice(0, 2).reverse());
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames);
+  const result = retention(backups); assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).removed, retentionNames.slice(0, 2).reverse());
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames.slice(2));
+  assert.doesNotMatch(result.stdout + result.stderr, /PRIVATE_RESTORE|fixture@example/);
+  assert.deepEqual(JSON.parse(retention(backups).stdout).removed, []);
+});
+
+test('damaged, partial and unrecognized backups never displace two complete recovery sets', async t => {
+  const {backups} = await retentionFixture(t);
+  await writeFile(path.join(backups, retentionNames[3], 'state', 'accounts.enc'), 'tampered');
+  const incomplete = '20260105T010000Z-0.8.9-55555555-previous';
+  await mkdir(path.join(backups, incomplete, 'state'), {recursive: true});
+  await writeFile(path.join(backups, 'unrecognized.tar.gz'), 'preserve for manual review');
+  const result = retention(backups); assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report.retained, retentionNames.slice(1, 3).reverse());
+  assert.deepEqual(report.removed, [retentionNames[0]]);
+  assert.deepEqual(report.preserved.sort(), [retentionNames[3], incomplete, 'unrecognized.tar.gz'].sort());
+  assert.deepEqual((await readdir(backups)).sort(), [...retentionNames.slice(1), incomplete, 'unrecognized.tar.gz'].sort());
+});
+
+test('backup retention preserves all recovery sets when fewer than three validate', async t => {
+  const {backups} = await retentionFixture(t, 3);
+  await writeFile(path.join(backups, retentionNames[2], 'state', 'accounts.key'), Buffer.alloc(32, 7));
+  const result = retention(backups); assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).removed, []);
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames.slice(0, 3));
+});
+
+test('backup retention refuses a linked backup root without touching its target', async t => {
+  const {root, backups} = await retentionFixture(t, 3);
+  const aliasParent = path.join(root, 'alias'); await mkdir(aliasParent);
+  const alias = path.join(aliasParent, 'backups');
+  await symlink(backups, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const result = retention(alias); assert.notEqual(result.status, 0);
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames.slice(0, 3));
+});
+
+test('backup deletion unlinks dependency symlinks without traversing external targets', {skip: process.platform === 'win32'}, async t => {
+  const {root, backups} = await retentionFixture(t, 3);
+  const external = path.join(root, 'external'); await mkdir(external);
+  const sentinel = path.join(external, 'keep.txt'); await writeFile(sentinel, 'must survive');
+  const bin = path.join(backups, retentionNames[0], 'project', 'node_modules', '.bin'); await mkdir(bin, {recursive: true});
+  await symlink(external, path.join(bin, 'outside'), 'dir');
+  await symlink(sentinel, path.join(bin, 'outside-file'), 'file');
+  const result = retention(backups); assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(sentinel, 'utf8'), 'must survive');
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames.slice(1, 3));
+});
+
+
+test('legacy backup configuration is preserved or deleted with its complete recovery set', async t => {
+  const {backups} = await retentionFixture(t, 3);
+  for (const name of [retentionNames[0], retentionNames[2]]) await writeFile(path.join(backups, name, 'config.json'), '{"synthetic":true}');
+  const result = retention(backups); assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).removed, [retentionNames[0]]);
+  assert.equal(await readFile(path.join(backups, retentionNames[2], 'config.json'), 'utf8'), '{"synthetic":true}');
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames.slice(1, 3));
+});
+
+
+test('new backup source manifests require the exact saved source inventory and hashes', async t => {
+  const {backups} = await retentionFixture(t);
+  for (const name of retentionNames.slice(2)) await writeFile(path.join(backups, name, 'project', 'server', 'optional.mjs'), 'source covered by manifest');
+  for (const name of retentionNames) {
+    const result = py('d.write_backup_source_manifest(pathlib.Path(sys.argv[2]))', [path.join(backups, name)]);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  // Additional source files are protected too, beyond the legacy minimum checks.
+  await writeFile(path.join(backups, retentionNames[3], 'project', 'server', 'optional.mjs'), 'changed after snapshot');
+  await rm(path.join(backups, retentionNames[2], 'project', 'server', 'optional.mjs'));
+  const result = retention(backups); assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report.retained, retentionNames.slice(0, 2).reverse());
+  assert.deepEqual(report.removed, []);
+  assert.deepEqual(report.preserved, retentionNames.slice(2));
+  assert.deepEqual((await readdir(backups)).sort(), retentionNames);
+});
