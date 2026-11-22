@@ -1,4 +1,5 @@
 import { createMailTools } from './mail-tools.mjs';
+import { loadLabelFilters, saveLabelFilters, normalizeLabelFilters } from './mail-filter-preferences.mjs';
 import { attachmentSize } from './mail-attachments.mjs';
 import { createComposeView } from './compose.mjs';
 import { createConversationView } from './mail-conversation.mjs';
@@ -111,9 +112,9 @@ export function createMailView(options = {}) {
     metadataLoaded: false, metadataDirty: true, metadataRevision: 0,
     pending: null, running: false, revision: 0, readerRevision: 0, session: 0,
     fingerprint: null, lastLoaded: 0,
-    selection: new Set(), filters: {}, sort: 'date_desc', bodySearch: false, threaded: false,
+    selection: new Set(), filters: loadLabelFilters(), sort: 'date_desc', bodySearch: false, threaded: false,
     density: ['compact', 'default'].includes(safeStorage.get('mailharbor_density', 'default')) ? safeStorage.get('mailharbor_density', 'default') : 'default',
-    readingMode: ['split', 'full'].includes(safeStorage.get('mailharbor_reading_mode', 'split')) ? safeStorage.get('mailharbor_reading_mode', 'split') : 'split',
+    readingMode: ['split', 'full'].includes(safeStorage.get('mailharbor_reading_mode', 'full')) ? safeStorage.get('mailharbor_reading_mode', 'full') : 'full',
     markReadDelay: clampMarkReadDelay(safeStorage.get('mailharbor_mark_read_delay', '0')),
     cache: null,
     savedListScroll: 0, savedReaderScroll: 0
@@ -122,6 +123,7 @@ export function createMailView(options = {}) {
   let committedAccountId = '';
   let committedFolder = 'inbox';
   let searchCancelled = false;
+  let labelSummaryOpen = false;
 
   function parseMailbox(item) {
     if (!item) return null;
@@ -216,6 +218,7 @@ export function createMailView(options = {}) {
     onSearchClear: () => {
       state.query = '';
       state.filters = {};
+      saveLabelFilters(state.filters);
       state.bodySearch = false;
       state.sort = 'date_desc';
       if (state.folder === 'all') state.folder = 'inbox';
@@ -413,6 +416,18 @@ export function createMailView(options = {}) {
     }
     summary.replaceChildren();
     const chipsWrapper = make('div', undefined, 'mail-search-chips');
+    const included = state.filters.includeLabels ?? [], excluded = state.filters.excludeLabels ?? [];
+    let labelChips;
+    if (included.length || excluded.length) {
+      const group = make('details', undefined, 'mail-label-summary');
+      group.open = labelSummaryOpen;
+      group.addEventListener('toggle', () => { labelSummaryOpen = group.open; });
+      const counts = [included.length && `${included.length} included`, excluded.length && `${excluded.length} excluded`].filter(Boolean);
+      group.append(make('summary', `Labels · ${counts.join(' · ')}`));
+      labelChips = make('div', undefined, 'mail-label-summary-chips');
+      group.append(labelChips);
+      chipsWrapper.append(group);
+    }
 
     if (state.query) {
       const chip = make('span', undefined, 'mail-filter-chip');
@@ -431,10 +446,11 @@ export function createMailView(options = {}) {
           const name = labels().find(label => label.id === id)?.label || id;
           const label = `${key === 'includeLabels' ? 'Include' : 'Exclude'}: ${name}`;
           const chip = make('span', undefined, 'mail-filter-chip');
+          chip.title = label;
           chip.append(make('span', label));
           const remove = button('✕', () => mailTools.removeCriteria(key, id), 'mail-chip-remove');
           remove.setAttribute('aria-label', `Remove ${label} filter`);
-          chip.append(remove); chipsWrapper.append(chip);
+          chip.append(remove); labelChips.append(chip);
         }
         continue;
       }
@@ -512,13 +528,20 @@ export function createMailView(options = {}) {
     $('mail-more').textContent = state.loadingMore ? 'Loading…' : 'Load more';
     $('mail-list').setAttribute('aria-busy', String(state.loading || state.loadingMore || state.refreshing));
     const loaded = state.messages.length.toLocaleString();
-    $('mail-list-count').textContent = state.showingPreviousResults ? 'Previous results · Loading…' : state.loading && !state.refreshing ? 'Loading…' : state.totalComplete && state.total !== null ? `${loaded} of ${state.total.toLocaleString()} messages` : `${loaded} messages loaded${state.listErrors.length ? ' · partial results' : ''}`;
+    $('mail-list-count').textContent = state.showingPreviousResults ? (state.loading ? 'Previous results · Loading…' : 'Previous results') : state.loading && !state.refreshing ? 'Loading…' : state.totalComplete && state.total !== null ? `${loaded} of ${state.total.toLocaleString()} messages` : `${loaded} messages loaded${state.listErrors.length ? ' · partial results' : ''}`;
 
     renderSearchSummary();
     mailTools.render($('mail-tools'), {settingsHost: $('mail-tools-settings'), advancedButton: $('mail-advanced'), selectionHost: $('mail-folder-selection')});
 
     $('mail-page')?.classList.toggle('mail-density-compact', state.density === 'compact');
     $('mail-page')?.classList.toggle('mail-reading-full', state.readingMode === 'full');
+    if ($('mail-layout-toggle')) {
+      const isSplit = state.readingMode === 'split';
+      $('mail-layout-toggle').setAttribute('aria-pressed', String(isSplit));
+      const layoutLabel = isSplit ? 'Switch to full-width Gmail list' : 'Switch to split reading pane';
+      $('mail-layout-toggle').title = layoutLabel;
+      $('mail-layout-toggle').setAttribute('aria-label', layoutLabel);
+    }
     if ($('mail-density-setting')) $('mail-density-setting').value = state.density;
     if ($('mail-reading-mode-setting')) $('mail-reading-mode-setting').value = state.readingMode;
     if ($('mail-mark-read-setting')) $('mail-mark-read-setting').value = String(state.markReadDelay);
@@ -561,9 +584,8 @@ export function createMailView(options = {}) {
     if (state.showingPreviousResults) {
       const prevBar = make('div', undefined, 'mail-previous-results-bar');
       prevBar.setAttribute('role', 'status');
-      prevBar.append(make('span', 'Showing previous results while searching… '));
-      const cancelBtn = button('Cancel search', cancelActiveSearch, 'subtle');
-      prevBar.append(cancelBtn);
+      prevBar.append(make('span', state.loading ? 'Searching… Previous results shown.' : 'Showing previous results.'));
+      if (state.loading) prevBar.append(button('Cancel search', cancelActiveSearch, 'subtle'));
       list.append(prevBar);
     }
 
@@ -631,6 +653,14 @@ export function createMailView(options = {}) {
         renderControls();
       });
 
+      const inlineStar = button(message.starred ? '★' : '☆', event => {
+        event.stopPropagation();
+        void applyAction(message.starred ? 'unstar' : 'star', undefined, message.id);
+      }, `subtle mail-inline-star${message.starred ? ' starred' : ''}`);
+      inlineStar.title = message.starred ? 'Unstar' : 'Star';
+      inlineStar.setAttribute('aria-label', inlineStar.title);
+      inlineStar.setAttribute('aria-pressed', String(Boolean(message.starred)));
+
       const row = button('', () => openMessage(message), `mail-row${message.unread ? ' unread' : ''}${message.id === state.selectedId ? ' selected' : ''}`);
       row.dataset.messageId = message.id;
       if (message.id === state.selectedId) row.setAttribute('aria-current', 'true');
@@ -644,10 +674,10 @@ export function createMailView(options = {}) {
 
       const subject = make('div', undefined, 'mail-row-subject');
       const dot = make('span', message.unread ? '●' : '', 'mail-unread-dot'); dot.setAttribute('aria-label', message.unread ? 'Unread' : 'Read');
-      subject.append(dot, make('span', message.subject || '(No subject)'));
+      subject.append(dot, make('span', message.subject || '(No subject)', 'mail-row-subject-text'));
 
       if (message.snippet) {
-        const snip = make('span', ` · ${message.snippet}`, 'mail-row-snippet');
+        const snip = make('span', ` — ${message.snippet}`, 'mail-row-snippet');
         subject.append(snip);
       }
 
@@ -660,7 +690,7 @@ export function createMailView(options = {}) {
         const chipLabel = chipCount === 1 ? `📎 ${message.attachments[0].filename || 'file'}` : `📎 ${chipCount} files`;
         meta.append(make('span', chipLabel, 'mail-tag-badge mail-att-chip'));
       } else if (message.hasAttachments) {
-        meta.append(make('span', 'Attachment', 'mail-tag-badge'));
+        meta.append(make('span', '📎 Attachment', 'mail-tag-badge mail-att-chip'));
       }
 
       if (message.starred) {
@@ -670,23 +700,34 @@ export function createMailView(options = {}) {
       }
 
       const quickActions = make('div', undefined, 'mail-row-quick-actions');
-      const starBtn = button(message.starred ? '★' : '☆', event => {
+      if (state.folder !== 'archive' && state.folder !== 'trash') {
+        const archiveBtn = iconAction('Archive', FOLDERS.find(folder => folder.id === 'archive').icon, event => {
+          event.stopPropagation();
+          void applyAction('archive', undefined, message.id);
+        }, 'mail-quick-archive');
+        quickActions.append(archiveBtn);
+      }
+      if (state.folder !== 'trash') {
+        const trashBtn = iconAction('Move to Trash', FOLDERS.find(folder => folder.id === 'trash').icon, event => {
+          event.stopPropagation();
+          void applyAction('delete', 'quick_trash', message.id);
+        }, 'mail-quick-delete');
+        quickActions.append(trashBtn);
+      }
+      const readLabel = message.unread ? 'Mark read' : 'Mark unread';
+      const readPath = message.unread ? 'M3 8l9 6 9-6 M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z' : 'M3 5h18v14H3z M3 5l9 7 9-7';
+      const readBtn = iconAction(readLabel, readPath, event => {
+        event.stopPropagation();
+        void applyAction(message.unread ? 'mark_read' : 'mark_unread', undefined, message.id);
+      }, 'mail-quick-read');
+      const starBtn = iconAction(message.starred ? 'Unstar' : 'Star', FOLDERS.find(folder => folder.id === 'starred').icon, event => {
         event.stopPropagation();
         void applyAction(message.starred ? 'unstar' : 'star', undefined, message.id);
-      }, 'subtle mail-quick-star');
-      starBtn.title = message.starred ? 'Unstar' : 'Star';
-      starBtn.setAttribute('aria-label', starBtn.title);
+      }, `mail-quick-star${message.starred ? ' starred' : ''}`);
+      quickActions.append(readBtn, starBtn);
 
-      const archiveBtn = button('📦', event => {
-        event.stopPropagation();
-        void applyAction('archive', undefined, message.id);
-      }, 'subtle mail-quick-archive');
-      archiveBtn.title = 'Archive';
-      archiveBtn.setAttribute('aria-label', 'Archive');
-
-      quickActions.append(starBtn, archiveBtn);
       row.append(top, subject, meta);
-      item.append(selection, row, quickActions); list.append(item);
+      item.append(selection, inlineStar, row, quickActions); list.append(item);
     }
   }
 
@@ -869,7 +910,12 @@ export function createMailView(options = {}) {
     }
 
     if (state.readerBusy) {
-      statusContainer.append(emptyState('Opening your message…', 'Fetching its text from the original mailbox.', '◌'));
+      const loadingBar = make('div', undefined, 'mail-reader-loading');
+      loadingBar.setAttribute('role', 'status');
+      const pulse = make('span', '◌', 'mail-reader-spinner');
+      pulse.setAttribute('aria-hidden', 'true');
+      loadingBar.append(pulse, make('span', 'Loading message content…'));
+      statusContainer.append(loadingBar);
     } else if (state.readerError) {
       const error = make('p', state.readerError, 'mail-reader-error');
       error.setAttribute('role', 'alert');
@@ -1001,7 +1047,7 @@ export function createMailView(options = {}) {
       readerAppointmentEl = make('div', undefined, 'mail-reader-appointment-container');
       readerBodyHost = make('div', undefined, 'mail-conversation-host');
 
-      reader.append(readerToolbarEl, readerStatusEl, readerHeadingEl, readerAppointmentEl, readerBodyHost);
+      reader.append(readerToolbarEl, readerHeadingEl, readerAppointmentEl, readerStatusEl, readerBodyHost);
     }
 
     renderReaderToolbar(readerToolbarEl);
@@ -1107,28 +1153,51 @@ export function createMailView(options = {}) {
     }, state.markReadDelay);
   }
 
+  let metadataInFlight = null;
+
   async function loadMetadata() {
+    if (metadataInFlight && metadataInFlight.session === state.session && metadataInFlight.revision === state.metadataRevision) {
+      return metadataInFlight.promise;
+    }
     const session = state.session;
     const revision = ++state.metadataRevision;
     const tagRevision = state.tagRevision;
-    const data = await api('/api/mail/folders', {timeout: 130000});
-    if (session !== state.session || revision !== state.metadataRevision) return;
-    state.accounts = Array.isArray(data.accounts) ? data.accounts : [];
-    let folders = Array.isArray(data.folders) ? data.folders : [];
-    if (tagRevision !== state.tagRevision) {
-      const currentLabels = state.folders.filter(folder => TAGS.some(tag => folder.id === `tag:${tag.id}`));
-      folders = [...folders.filter(folder => !currentLabels.some(label => label.id === folder.id)), ...currentLabels];
-    }
-    state.folders = folders;
-    state.metadataErrors = Array.isArray(data.errors) ? data.errors : [];
-    state.metadataLoaded = true;
-    state.metadataDirty = false;
-    renderAccounts();
-    renderFolders();
+    const promise = (async () => {
+      const data = await api('/api/mail/folders', {timeout: 130000});
+      if (session !== state.session || revision !== state.metadataRevision) return;
+      state.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+      let folders = Array.isArray(data.folders) ? data.folders : [];
+      if (tagRevision !== state.tagRevision) {
+        const currentLabels = state.folders.filter(folder => TAGS.some(tag => folder.id === `tag:${tag.id}`));
+        folders = [...folders.filter(folder => !currentLabels.some(label => label.id === folder.id)), ...currentLabels];
+      }
+      state.folders = folders;
+      const savedLabels = normalizeLabelFilters(state.filters, labels().map(label => label.id));
+      if (JSON.stringify(savedLabels) !== JSON.stringify(normalizeLabelFilters(state.filters))) {
+        delete state.filters.includeLabels;
+        delete state.filters.excludeLabels;
+        Object.assign(state.filters, savedLabels);
+        saveLabelFilters(state.filters);
+      }
+      mailTools.pruneLabelCriteria(labels().map(label => label.id));
+      state.metadataErrors = Array.isArray(data.errors) ? data.errors : [];
+      state.metadataLoaded = true;
+      state.metadataDirty = false;
+      renderAccounts();
+      renderFolders();
+      renderControls();
+    })();
+    metadataInFlight = {session, revision, promise};
+    try { return await promise; }
+    finally { if (metadataInFlight?.promise === promise) metadataInFlight = null; }
   }
 
   async function refreshCounts() {
     const session = state.session;
+    if (metadataInFlight && metadataInFlight.session === session && metadataInFlight.revision === state.metadataRevision) {
+      try { await metadataInFlight.promise; } catch {}
+      return;
+    }
     state.metadataDirty = true;
     try { await loadMetadata(); }
     catch { if (session === state.session) state.metadataDirty = true; }
@@ -1177,7 +1246,8 @@ export function createMailView(options = {}) {
 
   async function applyAction(action, confirmation, targetId = state.selectedId) {
     if (state.actionBusy) return;
-    if (action === 'delete' && (!confirmation || confirmation !== deleteConfirmation || confirmation.id !== state.selectedId || confirmation.session !== state.session || confirmation.readerRevision !== state.readerRevision)) return;
+    const isQuickTrash = action === 'delete' && confirmation === 'quick_trash' && Boolean(targetId) && state.folder !== 'trash';
+    if (action === 'delete' && !isQuickTrash && (!confirmation || confirmation !== deleteConfirmation || confirmation.id !== state.selectedId || confirmation.session !== state.session || confirmation.readerRevision !== state.readerRevision)) return;
     const id = targetId;
     const session = state.session;
     state.actionBusy = true; renderReader(); setNotice('');
@@ -1223,6 +1293,7 @@ export function createMailView(options = {}) {
     state.query = committedQuery;
     if (searchInput && searchInput.value !== committedQuery) searchInput.value = committedQuery;
     if (filters !== undefined) state.filters = filters;
+    saveLabelFilters(state.filters);
     if (bodySearch !== undefined) state.bodySearch = Boolean(bodySearch);
     if (sort !== undefined) state.sort = sort;
     if (allFolders !== undefined) {
@@ -1332,7 +1403,13 @@ export function createMailView(options = {}) {
         try {
           if (request.revision !== state.revision) continue;
           if (state.metadataDirty) {
-            void loadMetadata().catch(() => {});
+            const metadata = loadMetadata();
+            // Resolve saved custom labels before asking the server to validate them.
+            if ([...(request.filters.includeLabels ?? []), ...(request.filters.excludeLabels ?? [])].some(id => id.startsWith('custom_'))) {
+              await metadata;
+              if (session !== state.session || request.revision !== state.revision) continue;
+              request.filters = {...state.filters};
+            } else void metadata.catch(() => {});
           }
 
           const body = {folder: request.folder};
@@ -1419,6 +1496,7 @@ export function createMailView(options = {}) {
             state.loading = false;
             state.loadingMore = false;
             state.refreshing = false;
+            activeListAbort = null;
             renderList();
             if (request.isRefresh) {
               if ($('mail-list-pane')) $('mail-list-pane').scrollTop = state.savedListScroll;
@@ -1546,6 +1624,7 @@ export function createMailView(options = {}) {
       state.accountId = snap.accountId;
       state.query = snap.query;
       state.filters = {...snap.filters};
+      saveLabelFilters(state.filters);
       state.sort = snap.sort;
       state.bodySearch = snap.bodySearch;
       state.live = Boolean(snap.live);
@@ -1674,6 +1753,9 @@ export function createMailView(options = {}) {
         event.preventDefault();
         composer.open({mode: 'forward', id: state.message.id, accountId: state.message.accountId});
       }
+    } else if (event.key === 'c') {
+      event.preventDefault();
+      composer.open({accountId: state.accountId || undefined});
     } else if (event.key === '/') {
       const searchInput = $('mail-search');
       if (searchInput) {
@@ -1770,6 +1852,13 @@ export function createMailView(options = {}) {
     state.readingMode = $('mail-reading-mode-setting').value === 'full' ? 'full' : 'split';
     safeStorage.set('mailharbor_reading_mode', state.readingMode);
     renderControls();
+    if (!state.selectedId) renderReader();
+  });
+  $('mail-layout-toggle')?.addEventListener('click', () => {
+    state.readingMode = state.readingMode === 'full' ? 'split' : 'full';
+    safeStorage.set('mailharbor_reading_mode', state.readingMode);
+    renderControls();
+    if (!state.selectedId) renderReader();
   });
   $('mail-mark-read-setting')?.addEventListener('change', () => {
     clearTimeout(markReadTimer);
@@ -1779,6 +1868,7 @@ export function createMailView(options = {}) {
     renderControls();
   });
   $('mail-compose')?.addEventListener('click', () => composer.open({accountId: state.accountId || undefined}));
+  $('mail-sidebar-compose')?.addEventListener('click', () => composer.open({accountId: state.accountId || undefined}));
   $('mail-search-form')?.addEventListener('submit', event => {
     event.preventDefault();
     try {
@@ -1856,10 +1946,11 @@ export function createMailView(options = {}) {
       composer.reset();
       conversation.reset();
       state.selection.clear();
-      Object.assign(state, {filters: {}, sort: 'date_desc', bodySearch: false, threaded: false});
+      Object.assign(state, {filters: loadLabelFilters(), sort: 'date_desc', bodySearch: false, threaded: false});
       state.session++;
       state.revision++;
       state.pending = null;
+      metadataInFlight = null;
       Object.assign(state, {
         visible: false, initialized: false, folder: 'inbox', accountId: '', query: '',
         accounts: [], folders: [], metadataErrors: [], listErrors: [], messages: [],
@@ -1908,6 +1999,7 @@ export function createMailView(options = {}) {
       state.readingMode = mode === 'full' ? 'full' : 'split';
       safeStorage.set('mailharbor_reading_mode', state.readingMode);
       renderControls();
+      if (!state.selectedId) renderReader();
     },
     setMarkReadDelay(delayMs) {
       clearTimeout(markReadTimer);

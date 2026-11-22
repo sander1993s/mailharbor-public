@@ -24,7 +24,9 @@ export async function createMailIndex(directory) {
   for (const [name, type] of [['analysis', "TEXT NOT NULL DEFAULT ''"], ['category', "TEXT NOT NULL DEFAULT ''"], ['age', 'REAL']]) {
     if (!columns.has(name)) db.exec(`ALTER TABLE documents ADD COLUMN ${name} ${type}`);
   }
-  db.exec('CREATE INDEX IF NOT EXISTS processing_work ON documents(kind,state,owner,due,age,key); CREATE INDEX IF NOT EXISTS processing_category ON documents(kind,category,key);');
+  db.exec(`CREATE INDEX IF NOT EXISTS processing_work ON documents(kind,state,owner,due,age,key);
+    CREATE INDEX IF NOT EXISTS processing_category ON documents(kind,category,key);
+    CREATE INDEX IF NOT EXISTS processing_analysis ON documents(kind,analysis);`);
   let failed = false;
   const tagListeners = new Set();
   const token = text => createHmac('sha256', key).update(text).digest('hex');
@@ -119,8 +121,18 @@ export async function createMailIndex(directory) {
     tagEntries(owners, label) {
       if (!owners.length) return [];
       const args = owners.map(owner => token(`owner:${owner}`));
-      if (label) args.push(token(`label:${label}`));
-      return db.prepare(`SELECT DISTINCT d.* FROM documents d JOIN labels l ON d.kind='tags' AND d.key=l.key WHERE l.owner IN (${owners.map(() => '?').join(',')})${label ? ' AND l.label=?' : ''} ORDER BY l.stamp DESC,d.key`).all(...args).map(row => ({ key: row.key, value: decode(row) }));
+      const selected = Array.isArray(label) ? label : label ? [label] : [];
+      if (Array.isArray(label) && !selected.length) return [];
+      args.push(...selected.map(value => token(`label:${value}`)));
+      // Group small lookup rows before reading ciphertext. The previous DISTINCT
+      // join copied every encrypted document once per label into its sort buffer.
+      const rows = db.prepare(`SELECT key,max(stamp) AS stamp FROM labels WHERE owner IN (${owners.map(() => '?').join(',')})${selected.length ? ` AND label IN (${selected.map(() => '?').join(',')})` : ''} GROUP BY key ORDER BY stamp DESC,key`);
+      const read = db.prepare("SELECT * FROM documents WHERE kind='tags' AND key=?"), entries = [];
+      for (const row of rows.iterate(...args)) {
+        const document = read.get(row.key);
+        if (document) entries.push({ key: row.key, value: decode(document) });
+      }
+      return entries;
     },
     close() { db.close(); key.fill(0); }
   };

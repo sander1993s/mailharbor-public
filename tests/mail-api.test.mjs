@@ -422,7 +422,8 @@ test('label filters include any chosen label, exclude matching labels, and prese
     assert.equal(options.folder, 'inbox'); assert.equal(options.query, 'contract');
     assert.deepEqual(options.filters, { unread: false });
     assert.equal(options.bodySearch, true); assert.equal(options.sort, 'date_asc'); assert.equal(options.live, true);
-    return { messages: options.excludedReferences ? [item('a')] : [item('a'), item('b')], total: options.excludedReferences ? 1 : 2, totalComplete: true, errors: [] };
+    const messages = options.scopedReferences.map(reference => item(reference.accountId));
+    return { messages, total: messages.length, totalComplete: true, errors: [] };
   };
   const criteria = { folder: 'inbox', query: 'contract', filters: { includeLabels: ['work', custom], unread: false }, bodySearch: true, sort: 'date_asc', live: true };
   assert.equal((await h.api.list(criteria)).total, 2);
@@ -430,7 +431,7 @@ test('label filters include any chosen label, exclude matching labels, and prese
   const filtered = await h.api.list({ ...criteria, filters: { ...criteria.filters, excludeLabels: ['newsletters'] } });
   assert.equal(filtered.total, 1); assert.deepEqual(filtered.messages.map(message => message.accountId), ['a']);
   assert.deepEqual(requests[1].scopedReferences.map(reference => reference.accountId), ['a']);
-  assert.deepEqual(requests[1].excludedReferences.map(reference => reference.accountId), ['b']);
+  assert.equal(requests[1].excludedReferences, undefined, 'Exclusions are already applied to the included fingerprint set.');
   assert.doesNotMatch(JSON.stringify(filtered), /fingerprint|reference|uidValidity/);
 });
 
@@ -521,14 +522,85 @@ test('metadata and unrelated labels can change during a label query without inva
   assert.deepEqual(result.messages[0].tags, ['work', 'finance']);
 });
 
-test('label changes during an exclusion-only provider query invalidate the late result', async t => {
+test('label changes during a first-page exclusion search retry once with fresh membership', async t => {
   const h = harness(); t.after(() => h.api.close()); await h.api.list({ folder: 'inbox' });
   await h.api.setTag({ id: 'a-message', tag: 'work', enabled: true });
-  let release;
-  h.reader.list = async () => new Promise(resolve => { release = resolve; });
-  const pending = assert.rejects(h.api.list({ folder: 'inbox', filters: { excludeLabels: ['work'] } }), { code: 'stale_message' });
+  let release, searches = 0;
+  h.reader.list = async (_accounts, options) => {
+    if (++searches === 1) return new Promise(resolve => { release = resolve; });
+    assert.deepEqual(options.excludedReferences, []);
+    return { messages: [item('a'), item('b')], total: 2, totalComplete: true, errors: [] };
+  };
+  const list = h.api.list;
+  const pending = list({ folder: 'inbox', filters: { excludeLabels: ['work'] } });
   await h.api.setTag({ id: 'a-message', tag: 'work', enabled: false });
-  release({ messages: [item('b')], total: 1, totalComplete: true, errors: [] }); await pending;
+  release({ messages: [item('b')], total: 1, totalComplete: true, errors: [] });
+  const result = await pending;
+  assert.deepEqual(result.messages.map(message => message.accountId), ['a', 'b']); assert.equal(searches, 2);
+});
+
+test('label scope retries are bounded and cancelled work never starts a retry', async t => {
+  for (const cancel of [false, true]) await t.test(cancel ? 'cancellation' : 'continuous classification', async t => {
+    const h = harness(); t.after(() => h.api.close());
+    await h.api.list({ folder: 'inbox' });
+    const controller = new AbortController();
+    let searches = 0;
+    h.reader.list = async () => {
+      searches++;
+      await h.tags.set({ account: h.accounts.get('a'), message: item('a'), reference: item('a').reference, tag: 'work', enabled: searches % 2 === 1 });
+      if (cancel) controller.abort(new MailHarborError('cancelled'));
+      return { messages: [item('b')], total: 1, totalComplete: true, errors: [] };
+    };
+    await assert.rejects(h.api.list({ folder: 'inbox', filters: { excludeLabels: ['work'] } }, { signal: controller.signal }), { code: cancel ? 'cancelled' : 'stale_message' });
+    assert.equal(searches, cancel ? 1 : 2);
+  });
+});
+
+test('building an inclusion scope reads only included labels and applies exclusions from those entries', async t => {
+  const h = harness(); t.after(() => h.api.close());
+  await h.api.list({ folder: 'inbox' }); await h.api.setTag({ id: 'a-message', tag: 'work', enabled: true });
+  const queries = [], entries = h.tags.entries;
+  h.tags.entries = (accounts, options) => { queries.push(options); return entries(accounts, options); };
+  await h.api.list({ folder: 'inbox', filters: { includeLabels: ['work', 'finance'], excludeLabels: ['finance', 'newsletters'] } });
+  assert.ok(queries.length > 0);
+  assert.ok(queries.every(options => JSON.stringify(options.anyTags) === JSON.stringify(['work', 'finance'])));
+});
+
+test('unrelated excluded labels changing during an inclusion search do not retry or expire pagination', async t => {
+  const h = harness(); t.after(() => h.api.close());
+  await h.api.list({ folder: 'inbox' }); await h.api.setTag({ id: 'a-message', tag: 'work', enabled: true });
+  let searches = 0;
+  h.reader.list = async (_accounts, options) => {
+    searches++;
+    assert.equal(options.excludedReferences, undefined);
+    assert.deepEqual(options.scopedReferences.map(reference => reference.accountId), ['a']);
+    await h.tags.set({ account: h.accounts.get('b'), message: item('b'), reference: item('b').reference, tag: 'newsletters', enabled: searches === 1 });
+    return { messages: [item('a')], total: 2, totalComplete: true, errors: [], nextCursor: options.cursor ? null : { page: 2 } };
+  };
+  const criteria = { folder: 'inbox', filters: { includeLabels: ['work'], excludeLabels: ['newsletters'] } };
+  const first = await h.api.list(criteria);
+  assert.equal(searches, 1); assert.ok(first.nextCursor);
+  const second = await h.api.list({ ...criteria, cursor: first.nextCursor });
+  assert.equal(searches, 2); assert.equal(second.nextCursor, null);
+});
+
+test('a first-page label retry shares the original request deadline', { timeout: 2000 }, async t => {
+  const h = harness(); t.after(() => h.api.close());
+  let searches = 0;
+  h.reader.list = async (_accounts, options) => {
+    if (++searches === 1) {
+      await h.tags.set({ account: h.accounts.get('a'), message: item('a'), reference: item('a').reference, tag: 'work', enabled: true });
+      return { messages: [item('b')], total: 1, totalComplete: true, errors: [] };
+    }
+    // Keep the event loop active while the API's unref'ed timeout expires.
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, 1000);
+      options.signal.addEventListener('abort', () => { clearTimeout(timer); reject(options.signal.reason); }, { once: true });
+    });
+    return { messages: [], total: 0, totalComplete: true, errors: [] };
+  };
+  await assert.rejects(h.api.list({ folder: 'inbox', filters: { excludeLabels: ['work'] } }, { deadline: Date.now() + 100 }), { code: 'mailbox_timeout' });
+  assert.equal(searches, 2);
 });
 
 test('bulk actions require explicit permanent-delete confirmation, process serially, and sanitize partial failures', async t => {

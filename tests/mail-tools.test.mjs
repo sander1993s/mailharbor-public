@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {setImmediate as nextTurn} from 'node:timers/promises';
 import {createMailTools,buildMailFilters,selectionAccount} from '../web/mail-tools.mjs';
+import {LABEL_FILTERS_STORAGE_KEY,loadLabelFilters,normalizeLabelFilters,saveLabelFilters} from '../web/mail-filter-preferences.mjs';
 
 class Element {
   constructor(tag) {
@@ -543,4 +544,156 @@ test('label restoration, individual removal and clear preserve independent crite
   assert.deepEqual(view.tools.readDraft().filters,{});
   assert.equal(view.tools.readDraft().allFolders,false);
   assert.equal(view.host.querySelector('[data-mail-label-filter="custom_one"]').value,'');
+});
+
+test('label preferences survive reload without storing mail search content', () => {
+  const saved = new Map(), storage = {getItem:key => saved.get(key),setItem:(key,value) => saved.set(key,value)};
+  const custom = `custom_${'a'.repeat(32)}`;
+  const filters = {includeLabels:['work',custom,' work '],excludeLabels:['coupons'],from:'private@example.test',subject:'Private subject',body:'Private content'};
+  const normalized = saveLabelFilters(filters,storage);
+  assert.deepEqual(normalized,{includeLabels:[custom,'work'],excludeLabels:['coupons']});
+  assert.deepEqual(JSON.parse(saved.get(LABEL_FILTERS_STORAGE_KEY)),normalized);
+  filters.includeLabels.push('social'); normalized.excludeLabels.push('jobs');
+  const restored = loadLabelFilters(storage);
+  assert.deepEqual(restored,{includeLabels:[custom,'work'],excludeLabels:['coupons']});
+  restored.includeLabels.push('invoices');
+  assert.deepEqual(loadLabelFilters(storage).includeLabels,[custom,'work'],'Each load returns independent arrays');
+  saveLabelFilters({},storage);
+  assert.deepEqual(loadLabelFilters(storage),{},'Clear remains clear after reload');
+});
+
+test('label preferences reject malformed and oversized storage and invalid identifiers', () => {
+  for (const saved of [null,'{','null','true','[]','"work"',' '.repeat(16385)]) {
+    assert.deepEqual(loadLabelFilters({getItem:() => saved}),{});
+  }
+  assert.deepEqual(loadLabelFilters({getItem:() => JSON.stringify({
+    includeLabels:['work','unknown','tag:work','custom_one',null,2,'coupons','work'],
+    excludeLabels:['coupons','<script>',' jobs '],query:'not persisted'
+  })}),{includeLabels:['work'],excludeLabels:['coupons','jobs']});
+  const manyLabels = Array.from({length:200},(_,i) => `custom_${i.toString(16).padStart(32,'0')}`);
+  const bounded = normalizeLabelFilters({includeLabels:manyLabels});
+  assert.equal(bounded.includeLabels.length,128);
+  assert.deepEqual(normalizeLabelFilters({includeLabels:'work',excludeLabels:{0:'jobs'}}),{});
+});
+
+test('label preference storage failures do not interrupt applying filters', t => {
+  const storage = {getItem() { throw new Error('blocked'); },setItem() { throw new Error('full'); }};
+  assert.deepEqual(loadLabelFilters(storage),{});
+  assert.deepEqual(saveLabelFilters({includeLabels:['work']},storage),{includeLabels:['work']});
+  const before = Object.getOwnPropertyDescriptor(globalThis,'localStorage');
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,get() { throw new Error('blocked'); }});
+  t.after(() => before ? Object.defineProperty(globalThis,'localStorage',before) : delete globalThis.localStorage);
+  assert.deepEqual(loadLabelFilters(),{});
+  assert.deepEqual(saveLabelFilters({excludeLabels:['jobs']}),{excludeLabels:['jobs']});
+});
+
+test('normalizing against refreshed metadata removes deleted labels and preserves independent arrays', () => {
+  const custom = `custom_${'f'.repeat(32)}`;
+  const filters = {includeLabels:['work',custom],excludeLabels:['coupons'],subject:'Keep search'};
+  const labels = normalizeLabelFilters(filters,['work','coupons']);
+  assert.deepEqual(labels,{includeLabels:['work'],excludeLabels:['coupons']});
+  labels.includeLabels.push('orders');
+  assert.deepEqual(filters.includeLabels,['work',custom]);
+  assert.deepEqual(normalizeLabelFilters(filters,[]),{});
+});
+
+test('restored label preferences populate the panel and survive closing and reopening without searching', t => {
+  const submissions = [], state = {
+    accounts:[], folders:[{id:'tag:work',label:'Work'},{id:'tag:coupons',label:'Coupons'}],
+    filters:loadLabelFilters({getItem:() => '{"includeLabels":["work"],"excludeLabels":["coupons"]}'}),
+    folder:'inbox', sort:'date_desc'
+  };
+  const view = setup(t,{state,onSearchSubmit:draft => submissions.push(draft)});
+  const panel = () => view.host.querySelector('#mail-advanced-search');
+  view.advancedButton.dispatch('click');
+  assert.equal(panel().querySelector('[data-mail-label-filter="work"]').value,'include');
+  assert.equal(panel().querySelector('[data-mail-label-filter="coupons"]').value,'exclude');
+  panel().dispatch('keydown',{key:'Escape'});
+  view.advancedButton.dispatch('click');
+  assert.equal(panel().querySelector('[data-mail-label-filter="work"]').value,'include');
+  assert.equal(panel().querySelector('.mail-filter-advanced').open,false);
+  assert.equal(submissions.length,0);
+  view.button('Apply filters').dispatch('click');
+  assert.deepEqual(submissions[0].filters,{includeLabels:['work'],excludeLabels:['coupons']});
+});
+
+test('metadata label pruning preserves unfinished advanced fields, size units and valid label choices', t => {
+  const submissions = [], view = setup(t,{onSearchSubmit:draft => submissions.push(draft)});
+  view.state.folders.push({id:'tag:work',label:'Work'},{id:'tag:coupons',label:'Coupons'});
+  view.tools.restoreCriteria({filters:{includeLabels:['work','custom_deleted'],excludeLabels:['coupons']},allFolders:true});
+  view.advancedButton.dispatch('click');
+  const panel = () => view.host.querySelector('#mail-advanced-search');
+  const advanced = panel().querySelector('.mail-filter-advanced'); advanced.open = true; advanced.dispatch('toggle');
+  const from = view.field('From'); from.value = 'unfinished@example.test'; from.dispatch('input');
+  const custom = panel().querySelector('[data-mail-label-filter="custom_one"]'); custom.value = 'include'; custom.dispatch('change');
+  const draft = view.tools.getFilterDraft();
+  draft.minSize = '1.5'; draft.minSizeUnit = 'MB'; draft.bodySearch = true; draft.sort = 'subject_asc';
+  view.tools.pruneLabelCriteria(['work','coupons','custom_one']);
+  assert.deepEqual(view.tools.getFilterDraft().includeLabels,['work','custom_one']);
+  assert.equal(view.field('From').value,'unfinished@example.test');
+  assert.equal(view.tools.getFilterDraft().minSize,'1.5');
+  assert.equal(view.tools.getFilterDraft().minSizeUnit,'MB');
+  assert.equal(panel().hidden,false); assert.equal(panel().querySelector('.mail-filter-advanced').open,true);
+  assert.equal(panel().querySelector('[data-mail-label-filter="custom_one"]').value,'include');
+  assert.deepEqual(view.state.filters,{},'Pruning changes only the draft and does not apply it');
+  assert.equal(submissions.length,0);
+  const retainedField = view.field('From');
+  view.tools.pruneLabelCriteria(['work','coupons','custom_one']);
+  assert.equal(view.field('From'),retainedField,'Unchanged labels do not redraw an active input');
+  view.button('Apply filters').dispatch('click');
+  assert.deepEqual(submissions[0],{
+    query:'',filters:{includeLabels:['custom_one','work'],excludeLabels:['coupons'],from:'unfinished@example.test',minSize:1572864},
+    sort:'subject_asc',bodySearch:true,allFolders:true
+  });
+});
+
+test('provider updates defer active list requests and refresh the pending change once when idle', async t => {
+  let scheduled, revision = 'initial', refreshes = 0;
+  t.mock.method(globalThis,'setTimeout',callback => { scheduled = callback; return {unref(){}}; });
+  t.mock.method(globalThis,'clearTimeout',() => {});
+  const state = {selection:new Set(),selectedId:null}, notices = [];
+  const tools = createMailTools({
+    state, api:async () => ({revision}), refresh:async () => { refreshes++; },
+    setNotice:message => notices.push(message)
+  });
+  t.after(() => tools.reset());
+  tools.start(); await scheduled();
+  assert.equal(refreshes,0,'The first revision establishes the baseline');
+  for (const key of ['loading','loadingMore','refreshing']) {
+    state[key] = true; revision = key;
+    await scheduled(); await scheduled();
+    assert.equal(refreshes,0,`${key} must not be restarted by polling`);
+    assert.equal(notices.length,0,'Do not report an update while old results are still loading');
+    state[key] = false;
+  }
+  await scheduled();
+  assert.equal(refreshes,1,'The unchanged latest revision still has one pending refresh');
+  assert.equal(notices.length,1);
+  await scheduled();
+  assert.equal(refreshes,1,'A processed revision is not refreshed repeatedly');
+
+  state.selectedId = 'reading'; revision = 'while-reading'; await scheduled();
+  assert.equal(refreshes,1);
+  state.selectedId = null; await scheduled();
+  assert.equal(refreshes,2,'A deferred change remains pending while reading too');
+});
+
+test('failed background refresh retries the pending update and stop discards it', async t => {
+  let scheduled, revision = 0, refreshes = 0, fail = true;
+  t.mock.method(globalThis,'setTimeout',callback => { scheduled = callback; return {unref(){}}; });
+  t.mock.method(globalThis,'clearTimeout',() => {});
+  const state = {selection:new Set()};
+  const tools = createMailTools({state,api:async () => ({revision}),refresh:async () => {
+    refreshes++;
+    if (fail) throw new Error('Offline');
+  }});
+  t.after(() => tools.reset());
+  tools.start(); await scheduled(); revision++; await scheduled();
+  assert.equal(refreshes,1);
+  fail = false; await scheduled();
+  assert.equal(refreshes,2,'An unsuccessful refresh does not consume the update');
+  await scheduled(); assert.equal(refreshes,2);
+  state.loading = true; revision++; await scheduled();
+  tools.stop(); state.loading = false; tools.start(); await scheduled(); await scheduled();
+  assert.equal(refreshes,2,'Restart establishes a new baseline without a stale pending update');
 });

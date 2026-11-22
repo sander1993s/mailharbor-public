@@ -25,6 +25,23 @@ function dom(t) {
 }
 const status = changes => ({enabled: false, running: false, providerConsent: true, tenderConfigured: true, phase: 'idle', counts: {discovered: 12000, analyzed: 11000, markedRead: 10990, moved: 320, errors: 2, needsReview: 10}, lastRun: {status: 'completed', finishedAt: '2026-09-13T12:00:00Z'}, ...changes});
 
+test('blocked analysis explains AI sign-in, reports measured progress and includes mailbox diagnostics', async t => {
+  const ui = dom(t);
+  const view = createProcessingView({root: ui.root, api: async () => status({workerState: 'blocked', pauseReason: 'login_required',
+    counts: {discovered: 86024, analyzed: 10725},
+    metrics: {lastBatch: {messages: 2, latencyMs: 10687, at: '2026-09-22T15:04:00Z'}},
+    recentErrors: [{at: '2026-09-22T14:00:00Z', code: 'mailbox_error', phase: 'reading',
+      mailboxDiagnostic: {command: 'AUTHENTICATE', reason: 'timeout'}}]})});
+  await view.refresh();
+  assert.match(ui.root.textContent, /Open Settings → AI connection to reconnect/);
+  assert.match(ui.root.textContent, /12\.5% of discovered messages analyzed/);
+  assert.match(ui.root.textContent, /2 messages in 10\.7 seconds/);
+  assert.match(ui.root.textContent, /including queue wait/);
+  assert.match(ui.root.textContent, /AUTHENTICATE · timeout/);
+  assert.doesNotMatch(ui.root.textContent, /messages per hour|estimated completion|Next attempt:/);
+  view.destroy();
+});
+
 test('processing explains all category rules, safe deletion and delayed provider retries', async t => {
   const ui = dom(t);
   const view = createProcessingView({root: ui.root, api: async () => status({enabled: true, running: false, phase: 'quota', pauseReason: 'quota', retryAt: '2026-09-13T16:00:00Z', policies: [{id: 'tenders', label: 'Tenders', action: 'archive', retention: '2 months after the deadline; 6 months if unknown'}]})});

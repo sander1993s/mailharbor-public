@@ -122,8 +122,8 @@
 .compose-dialog .compose-chip-remove { flex-basis: 24px; width: 24px; height: 24px; min-height: 24px; padding: 3px; }
 .compose-chip-remove svg { width: 16px; height: 16px; flex-basis: 16px; }
 .compose-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-height: 68px; padding: 12px 16px 16px; }
-.compose-dialog .compose-send-button { min-width: 96px; min-height: 40px; padding: 10px 24px; border-radius: 22px; background: #0b57d0; color: #fff; font-size: 14px; font-weight: 500; }
-.compose-dialog .compose-send-button:hover:enabled { background: #1b61d1; box-shadow: 0 1px 3px #3c40434d; }
+.compose-dialog .compose-send-button { min-width: 96px; min-height: 40px; padding: 10px 24px; border-radius: 9999px; background: var(--brand, #01529a); color: #fff; font-size: 14px; font-weight: 600; }
+.compose-dialog .compose-send-button:hover:enabled { background: var(--brand-hover, #003e78); box-shadow: 0 2px 6px rgba(1, 82, 154, .3); }
 .compose-dialog .compose-send-button:focus-visible { outline-color: #fff; outline-offset: -4px; }
 .compose-dialog .compose-draft-button { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 6px 8px; font-size: 12px; }
 .compose-dialog .compose-discard-button { margin-left: auto; }
@@ -175,6 +175,38 @@ body:has(.compose-dialog[open]) #mail-compose { visibility: hidden; }
 .smtp-settings button { justify-self: start; }
 .smtp-settings p { margin: 0; font-size: .84rem; overflow-wrap: anywhere; }
 .smtp-warning { color: var(--danger, #973e31); }
+
+/* Dark mode support for compose dialog */
+:root[data-theme="dark"] .compose-dialog { background: #0b1c32; color: #f8fafc; border: 1px solid #1e3454; box-shadow: 0 14px 44px rgba(2, 8, 23, .65); }
+:root[data-theme="dark"] .compose-heading { background: #10243e; }
+:root[data-theme="dark"] .compose-heading h2 { color: #f8fafc; }
+:root[data-theme="dark"] .compose-dialog button { color: #cbd5e1; }
+:root[data-theme="dark"] .compose-dialog button:hover:enabled { background: #17355b; }
+:root[data-theme="dark"] .compose-dialog .compose-send-button { background: #0284c7; color: #fff; }
+:root[data-theme="dark"] .compose-dialog .compose-send-button:hover:enabled { background: #0ea5e9; }
+:root[data-theme="dark"] .compose-recipient-row,
+:root[data-theme="dark"] .compose-subject-row,
+:root[data-theme="dark"] .compose-toolbar { border-bottom-color: #1e3454; }
+:root[data-theme="dark"] .compose-recipient-row > label,
+:root[data-theme="dark"] .compose-dialog .compose-recipient-toggle,
+:root[data-theme="dark"] .compose-edit-sig-button,
+:root[data-theme="dark"] .compose-subject-row input::placeholder { color: #94a3b8; }
+:root[data-theme="dark"] .compose-dialog .compose-recipient-row :is(input, select),
+:root[data-theme="dark"] .compose-dialog .compose-subject-row input,
+:root[data-theme="dark"] .compose-dialog .compose-editor,
+:root[data-theme="dark"] .compose-dialog .compose-editor-content { background: transparent; color: #f8fafc; }
+:root[data-theme="dark"] .compose-chip { background: #17355b; color: #7dd3fc; }
+:root[data-theme="dark"] .compose-suggestions,
+:root[data-theme="dark"] .compose-signature-panel,
+:root[data-theme="dark"] .compose-link-panel,
+:root[data-theme="dark"] .compose-files li,
+:root[data-theme="dark"] .compose-review,
+:root[data-theme="dark"] .compose-discard { background: #10243e; border-color: #1e3454; color: #f8fafc; }
+:root[data-theme="dark"] .compose-signature-textarea,
+:root[data-theme="dark"] .compose-link-input { background: #071322; border-color: #1e3454; color: #f8fafc; }
+:root[data-theme="dark"] .compose-suggestion-item:hover,
+:root[data-theme="dark"] .compose-suggestion-item:focus { background: #17355b; }
+:root[data-theme="dark"] .compose-review h3 { color: #f8fafc; }
 
 @media (max-width: 640px) {
   .compose-dialog:not(.is-inline), .compose-dialog.is-expanded, .compose-dialog.is-minimized { inset: 0; width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; }

@@ -41,6 +41,8 @@ test('push displays a fixed generic notification and ignores arbitrary remote pa
 
 test('service worker caches only public shell assets and never intercepts API, OAuth or cross-origin requests', async () => {
   const fixture = harness({ offline: true }); await fixture.dispatch('install');
+  assert.equal(new Set(fixture.cached).size, fixture.cached.length, 'Cache.addAll must not receive duplicate requests');
+  assert.ok(fixture.cached.includes('/mail-filter-preferences.mjs'));
   assert.ok(fixture.cached.includes('/compose.mjs')); assert.ok(fixture.cached.includes('/mail-content.css'));
   assert.ok(fixture.cached.every(path => path.startsWith('/') && !/[?#]/u.test(path) && !/^\/(?:api|oauth)\//u.test(path)));
   for (const [path, method] of [['/api/mail/message', 'POST'], ['/api/mail/content', 'POST'], ['/api/mail/smtp', 'GET'], ['/api/session', 'GET'],

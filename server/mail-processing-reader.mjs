@@ -109,7 +109,7 @@ function metadata(account, folder, uidValidity, message) {
 
 /** Bounded all-folder transport. The caller persists checkpoints and classification results. */
 export function createMailProcessingReader({ connectionOptions, createClient, sessionTimeoutMs } = {}) {
-  const { session, active } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
+  const { session, active, close } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
 
   function live(client, signal) {
     abortCheck(signal);
@@ -571,5 +571,5 @@ export function createMailProcessingReader({ connectionOptions, createClient, se
     });
   }
 
-  return { folders, scan, read, readBatch, checkpoint, readNotification, markRead, move, moveBatch };
+  return { folders, scan, read, readBatch, checkpoint, readNotification, markRead, move, moveBatch, close };
 }

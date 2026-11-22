@@ -144,83 +144,221 @@ function preferredPart(structure) {
   if (!selected || !/^(?:\d+\.)*\d+$/u.test(String(selected.part || '1'))) return null;
   return { ...selected, part: String(selected.part || '1') };
 }
+const DEFAULT_POOL_IDLE_MS = 30_000;
+const POOL_PROBE_IDLE_MS = 5_000;
+const POOL_MAX_AGE_MS = 240_000;
+const POOL_MAX_PER_KEY = 2;
+
 /** Shared secure IMAP sessions; close() never expunges a selected mailbox. */
-export function createMailboxSession({ connectionOptions, createClient = options => new ImapFlow(options), sessionTimeoutMs = SESSION_TIMEOUT }) {
+export function createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs = SESSION_TIMEOUT, poolIdleMs }) {
   if (typeof connectionOptions !== 'function') throw new TypeError('connectionOptions is required');
   if (!Number.isInteger(sessionTimeoutMs) || sessionTimeoutMs < 1 || sessionTimeoutMs > 600_000) throw new TypeError('Invalid session timeout');
+  const effectiveIdleMs = poolIdleMs ?? (createClient ? 0 : DEFAULT_POOL_IDLE_MS);
+  if (!Number.isInteger(effectiveIdleMs) || effectiveIdleMs < 0 || effectiveIdleMs > 300_000) throw new TypeError('Invalid pool idle timeout');
+  const clientFactory = createClient ?? (options => new ImapFlow(options));
   const active = new WeakSet();
+  const idlePool = new Map();
+  let poolClosed = false;
+
+  function poolKey(account, options) {
+    const authSecret = String(options?.auth?.accessToken ?? options?.auth?.pass ?? '');
+    return createHash('sha256').update(JSON.stringify([
+      account?.id ?? '', account?.revision ?? 0, options?.host ?? '', options?.port ?? 993,
+      options?.auth?.user ?? '', authSecret
+    ])).digest('hex');
+  }
+
+  function removeIdle(conn) {
+    if (conn.idleTimer) { clearTimeout(conn.idleTimer); conn.idleTimer = null; }
+    const list = idlePool.get(conn.key);
+    if (list) {
+      const idx = list.indexOf(conn);
+      if (idx !== -1) list.splice(idx, 1);
+      if (!list.length) idlePool.delete(conn.key);
+    }
+  }
+
+  function destroyConn(conn) {
+    if (!conn || conn.destroyed) return;
+    conn.destroyed = true;
+    conn.broken = true;
+    removeIdle(conn);
+    active.delete(conn.client);
+    // close() never sends CLOSE, EXPUNGE or any mailbox mutation.
+    try { conn.client?.close(); } catch { /* Do not reveal library/server errors. */ }
+  }
+
+  function buildConn(options, key, accountId) {
+    const client = clientFactory({
+      ...options, secure: true, logger: false, emitLogs: false, logRaw: false, disableAutoIdle: true,
+      tls: { ...options.tls, rejectUnauthorized: true, minVersion: 'TLSv1.2' },
+      connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 30_000
+    });
+    const conn = { client, key, accountId, createdAt: Date.now(), returnedAt: 0, broken: false, destroyed: false, probing: false, idleTimer: null, ctx: null };
+    if (typeof client.exec === 'function') {
+      const execute = client.exec;
+      client.exec = async function (command, ...args) {
+        const ctx = conn.ctx;
+        const sequence = ctx ? ++ctx.commandSequence : 0;
+        const knownCommand = DIAGNOSTIC_COMMANDS.has(command) ? command : null;
+        if (ctx) { ctx.currentCommand = knownCommand; ctx.diagnostic = null; }
+        try { return await execute.call(this, command, ...args); }
+        catch (error) {
+          if (ctx && !ctx.stopped && sequence === ctx.commandSequence) ctx.diagnostic = mailboxDiagnostic(error, knownCommand);
+          throw error;
+        } finally { if (ctx && sequence === ctx.commandSequence) ctx.currentCommand = null; }
+      };
+    }
+    if (typeof client.on === 'function') {
+      // Keep this handler attached until the object is collected, including late socket errors after close().
+      client.on('error', error => {
+        conn.broken = true;
+        if (conn.probing) return;
+        const ctx = conn.ctx;
+        if (ctx) {
+          if (!ctx.stopped) ctx.diagnostic = mailboxDiagnostic(error, ctx.currentCommand);
+          ctx.stop(error?.authenticationFailed ? 'mailbox_login_required' : 'mailbox_error');
+        } else {
+          destroyConn(conn);
+        }
+      });
+      client.on('close', () => {
+        conn.broken = true;
+        if (!conn.ctx && !conn.probing) removeIdle(conn);
+      });
+    }
+    return conn;
+  }
+
+  async function checkoutIdle(key, accountId, signal) {
+    if (effectiveIdleMs <= 0 || poolClosed) return null;
+    if (accountId) {
+      for (const [otherKey, entries] of [...idlePool.entries()]) {
+        if (otherKey !== key && entries.some(entry => entry.accountId === accountId)) {
+          for (const entry of [...entries]) if (entry.accountId === accountId) destroyConn(entry);
+        }
+      }
+    }
+    const entries = idlePool.get(key);
+    while (entries?.length) {
+      const conn = entries.pop();
+      if (!entries.length) idlePool.delete(key);
+      if (conn.idleTimer) { clearTimeout(conn.idleTimer); conn.idleTimer = null; }
+      const now = Date.now();
+      if (conn.broken || conn.destroyed || conn.client.usable === false || conn.client.closed ||
+          now - conn.createdAt >= POOL_MAX_AGE_MS) {
+        destroyConn(conn);
+        continue;
+      }
+      if (now - conn.returnedAt >= POOL_PROBE_IDLE_MS && typeof conn.client.noop === 'function') {
+        conn.probing = true;
+        try {
+          await conn.client.noop();
+          abortCheck(signal);
+        } catch (error) {
+          conn.probing = false;
+          destroyConn(conn);
+          if (error instanceof MailHarborError && error.code === 'cancelled') throw error;
+          continue;
+        }
+        conn.probing = false;
+        if (conn.broken || conn.destroyed || conn.client.usable === false || conn.client.closed) {
+          destroyConn(conn);
+          continue;
+        }
+      }
+      return conn;
+    }
+    return null;
+  }
 
   async function session(account, signal, operation) {
     abortCheck(signal);
-    let client, timer, stopped = false, diagnostic = null, currentCommand = null, commandSequence = 0;
+    let conn = null, timer, completed = false;
     let rejectStop;
-    const stopPromise = new Promise((resolve, reject) => { rejectStop = reject; });
-    const stop = code => {
-      if (stopped) return;
-      if (code === 'mailbox_timeout') diagnostic = mailboxDiagnostic({ code }, currentCommand);
-      stopped = true;
-      if (client) active.delete(client);
-      try { client?.close(); } catch { /* Do not reveal library/server errors. */ }
-      rejectStop(new MailHarborError(code, messages[code]));
+    const stopPromise = new Promise((_, reject) => { rejectStop = reject; });
+    const ctx = {
+      stopped: false,
+      diagnostic: null,
+      currentCommand: null,
+      commandSequence: 0,
+      stop(code) {
+        if (ctx.stopped) return;
+        if (code === 'mailbox_timeout') ctx.diagnostic = mailboxDiagnostic({ code }, ctx.currentCommand);
+        ctx.stopped = true;
+        if (conn) { conn.ctx = null; destroyConn(conn); }
+        rejectStop(new MailHarborError(code, messages[code]));
+      }
     };
-    const onAbort = () => stop('cancelled');
+    const onAbort = () => ctx.stop('cancelled');
     signal?.addEventListener('abort', onAbort, { once: true });
-    timer = setTimeout(() => stop('mailbox_timeout'), sessionTimeoutMs);
+    timer = setTimeout(() => ctx.stop('mailbox_timeout'), sessionTimeoutMs);
     timer.unref?.();
     const work = async () => {
       const options = await connectionOptions(account);
       abortCheck(signal);
-      if (stopped) fail('mailbox_error');
-      client = createClient({
-        ...options, secure: true, logger: false, emitLogs: false, logRaw: false, disableAutoIdle: true,
-        tls: { ...options.tls, rejectUnauthorized: true, minVersion: 'TLSv1.2' },
-        connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 30_000
-      });
-      if (typeof client.exec === 'function') {
-        const execute = client.exec;
-        client.exec = async function (command, ...args) {
-          const sequence = ++commandSequence;
-          const knownCommand = DIAGNOSTIC_COMMANDS.has(command) ? command : null;
-          currentCommand = knownCommand; diagnostic = null;
-          try { return await execute.call(this, command, ...args); }
-          catch (error) {
-            if (!stopped && sequence === commandSequence) diagnostic = mailboxDiagnostic(error, knownCommand);
-            throw error;
-          } finally { if (sequence === commandSequence) currentCommand = null; }
-        };
-      }
-      active.add(client);
-      // Keep this handler attached until the object is collected, including late socket errors after close().
-      client.on('error', error => {
-        if (!stopped) diagnostic = mailboxDiagnostic(error, currentCommand);
-        stop(error?.authenticationFailed ? 'mailbox_login_required' : 'mailbox_error');
-      });
-      await client.connect();
+      if (ctx.stopped) fail('mailbox_error');
+      const key = poolKey(account, options);
+      const reused = await checkoutIdle(key, account?.id, signal);
       abortCheck(signal);
-      if (stopped) fail('mailbox_error');
-      return operation(client);
+      if (ctx.stopped) { if (reused) destroyConn(reused); fail('mailbox_error'); }
+      conn = reused ?? buildConn(options, key, account?.id);
+      conn.ctx = ctx;
+      active.add(conn.client);
+      if (!reused) {
+        await conn.client.connect();
+        abortCheck(signal);
+        if (ctx.stopped) fail('mailbox_error');
+      }
+      const value = await operation(conn.client);
+      completed = true;
+      return value;
     };
     try { return await Promise.race([work(), stopPromise]); }
-    catch (error) { throw sanitized(error, diagnostic ?? mailboxDiagnostic(error, currentCommand)); }
+    catch (error) { throw sanitized(error, ctx.diagnostic ?? mailboxDiagnostic(error, ctx.currentCommand)); }
     finally {
-      stopped = true;
-      if (client) active.delete(client);
+      ctx.stopped = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      // close() never sends CLOSE, EXPUNGE or any mailbox mutation.
-      try { client?.close(); } catch { /* best effort teardown */ }
+      if (conn) {
+        conn.ctx = null;
+        active.delete(conn.client);
+        const canPool = completed && !conn.broken && !conn.destroyed && !poolClosed &&
+          effectiveIdleMs > 0 && conn.client.usable !== false && !conn.client.closed &&
+          !conn.client.currentLock && !conn.client.locks?.length &&
+          Date.now() - conn.createdAt < POOL_MAX_AGE_MS;
+        if (canPool) {
+          conn.returnedAt = Date.now();
+          let list = idlePool.get(conn.key);
+          if (!list) { list = []; idlePool.set(conn.key, list); }
+          while (list.length >= POOL_MAX_PER_KEY) destroyConn(list.shift());
+          conn.idleTimer = setTimeout(() => destroyConn(conn), effectiveIdleMs);
+          conn.idleTimer.unref?.();
+          list.push(conn);
+        } else {
+          destroyConn(conn);
+        }
+      }
     }
   }
 
-  return { session, active };
+  function close() {
+    poolClosed = true;
+    for (const entries of [...idlePool.values()]) {
+      for (const entry of [...entries]) destroyConn(entry);
+    }
+    idlePool.clear();
+  }
+
+  return { session, active, close };
 }
 
 export { clean as cleanMailText, has as hasMailFlag, fingerprint as mailFingerprint,
   timestamp as mailTimestamp, preferredPart as preferredMailPart, selectable as selectableMailbox };
 
 /** Private, persistless mailbox access. All public errors exclude provider response text. */
-export function createMailboxService({ connectionOptions, createClient, now = () => Date.now(), sessionTimeoutMs = SESSION_TIMEOUT }) {
-  const { session, active } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
+export function createMailboxService({ connectionOptions, createClient, now = () => Date.now(), sessionTimeoutMs = SESSION_TIMEOUT, poolIdleMs }) {
+  const { session, active, close } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs, poolIdleMs });
 
   async function inbox(client, readOnly, operation) {
     const lock = await client.getMailboxLock('INBOX', { readOnly });
@@ -429,5 +567,5 @@ export function createMailboxService({ connectionOptions, createClient, now = ()
     return { applied, failed };
   }
 
-  return { test, scan, apply };
+  return { test, scan, apply, close };
 }

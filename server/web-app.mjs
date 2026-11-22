@@ -25,6 +25,7 @@ import { createMailSync } from './mail-sync.mjs';
 import { createMailConversations } from './mail-conversations.mjs';
 import { createNotificationStore } from './notification-store.mjs';
 import { createMailTelegram } from './mail-telegram.mjs';
+import { createGeminiApi } from './gemini-api.mjs';
 import { MailHarborError, VERSION, safeError } from './validation.mjs';
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled']);
@@ -47,7 +48,8 @@ const statusCodes = {
   cancelled: 408, cache_unavailable: 503, telegram_not_configured: 422, telegram_configuration_error: 422,
   telegram_authentication_failed: 422, telegram_forbidden: 422, telegram_rate_limited: 429,
   telegram_rejected: 422, telegram_unavailable: 502, telegram_cancelled: 408,
-  login_required: 503, login_failed: 422, login_expired: 410, login_unavailable: 503
+  login_required: 503, login_failed: 422, login_expired: 410, login_unavailable: 503,
+  provider_budget_reached: 503, quota_exhausted: 503, provider_error: 502, invalid_model_output: 502
 };
 
 const files = new Map([
@@ -56,8 +58,10 @@ const files = new Map([
   ['/app.mjs', ['app.mjs', 'text/javascript; charset=utf-8']],
   ['/account-setup.mjs', ['account-setup.mjs', 'text/javascript; charset=utf-8']],
   ['/agy-login.mjs', ['agy-login.mjs', 'text/javascript; charset=utf-8']],
+  ['/gemini-settings.mjs', ['gemini-settings.mjs', 'text/javascript; charset=utf-8']],
   ['/mail.mjs', ['mail.mjs', 'text/javascript; charset=utf-8']],
   ['/mail-tools.mjs', ['mail-tools.mjs', 'text/javascript; charset=utf-8']],
+  ['/mail-filter-preferences.mjs', ['mail-filter-preferences.mjs', 'text/javascript; charset=utf-8']],
   ['/telegram-settings.mjs', ['telegram-settings.mjs', 'text/javascript; charset=utf-8']],
   ['/mail-tools.css', ['mail-tools.css', 'text/css; charset=utf-8']],
   ['/controls.mjs', ['controls.mjs', 'text/javascript; charset=utf-8']],
@@ -182,7 +186,19 @@ export function createWebFactory(config, dependencies = {}) {
     let index;
     let processing;
     let composer, content, notifications, labelSync;
-    let cache, sync, adapter, conversations, telegram;
+    let cache, sync, adapter, conversations, telegram, geminiApi;
+    let originalProvider, rawProcessingReader, conversationSession, rawLabelReader, attachments;
+    const assetCache = new Map();
+
+    async function readStaticAsset(urlObj) {
+      const target = fileURLToPath(urlObj);
+      const cached = assetCache.get(target);
+      if (cached) return cached;
+      let bytes;
+      try { bytes = await readFile(target); } catch { fail('not_found'); }
+      assetCache.set(target, bytes);
+      return bytes;
+    }
 
     const accountForMutation = account => {
       const current = accounts.get(account?.id);
@@ -206,9 +222,11 @@ export function createWebFactory(config, dependencies = {}) {
 
     const ready = (async () => {
       const store = dependencies.store ?? await createAccountStore(config.stateDir);
+      geminiApi = dependencies.geminiApi ?? createGeminiApi({ store, fetcher: dependencies.fetcher });
+      jobs?.setGeminiProvider?.(geminiApi);
       accounts = createAccounts({ store, publicOrigin: config.origin, testAccount: value => mailboxes.test(value), fetcher: dependencies.fetcher });
       mailboxes = dependencies.mailboxes ?? createMailboxService({ connectionOptions: value => accounts.connectionOptions(value) });
-      const originalProvider = dependencies.reader ?? createMailReader({ connectionOptions: value => accounts.connectionOptions(value) });
+      originalProvider = dependencies.reader ?? createMailReader({ connectionOptions: value => accounts.connectionOptions(value) });
 
       const mailCacheEnabled = config.mailCache?.enabled === true;
       if (dependencies.mailCache !== undefined) {
@@ -281,7 +299,7 @@ export function createWebFactory(config, dependencies = {}) {
       index = dependencies.index ?? await createMailIndex(dependencies.store ? null : config.stateDir);
       const tags = createMailTags({ store, index });
 
-      const rawProcessingReader = dependencies.processingReader ?? createMailProcessingReader({ connectionOptions: value => accounts.connectionOptions(value) });
+      rawProcessingReader = dependencies.processingReader ?? createMailProcessingReader({ connectionOptions: value => accounts.connectionOptions(value) });
       const notificationState = dependencies.telegram ? null : dependencies.notificationState ?? await createNotificationStore(dependencies.store ? null : config.stateDir);
       telegram = dependencies.telegram ?? createMailTelegram({ store, state: notificationState, accounts,
         reader: dependencies.notificationReader ?? rawProcessingReader, jobs, origin: config.origin,
@@ -312,7 +330,7 @@ export function createWebFactory(config, dependencies = {}) {
         enqueueInvoice: input => invoices?.enqueue?.(input)
       });
 
-      const conversationSession = dependencies.conversationSession ?? createMailboxSession({ connectionOptions: value => accounts.connectionOptions(value) });
+      conversationSession = dependencies.conversationSession ?? createMailboxSession({ connectionOptions: value => accounts.connectionOptions(value) });
       conversations = dependencies.conversations ?? createMailConversations({
         session: conversationSession.session,
         active: conversationSession.active,
@@ -328,7 +346,7 @@ export function createWebFactory(config, dependencies = {}) {
         retentionMs: config.retentionMs
       });
 
-      const rawLabelReader = dependencies.labelReader ?? createMailLabelReader({ connectionOptions: value => accounts.connectionOptions(value) });
+      rawLabelReader = dependencies.labelReader ?? createMailLabelReader({ connectionOptions: value => accounts.connectionOptions(value) });
       const labelReader = new Proxy(rawLabelReader, {
         get(target, prop, receiver) {
           if (prop === 'sync') {
@@ -366,7 +384,7 @@ export function createWebFactory(config, dependencies = {}) {
         fetcher: dependencies.fetcher
       });
 
-      const attachments = dependencies.attachments ?? createInvoiceAttachments({
+      attachments = dependencies.attachments ?? createInvoiceAttachments({
         connectionOptions: value => accounts.connectionOptions(value)
       });
 
@@ -466,17 +484,15 @@ export function createWebFactory(config, dependencies = {}) {
           const onboardingQuery = url.pathname === '/' && ['?connected=1', '?connectionError=1', '?driveConnected=1', '?driveConnectionError=1'].includes(url.search);
           if (files.has(url.pathname) && ['GET', 'HEAD'].includes(request.method) && (!url.search || onboardingQuery)) {
             const [name, type] = files.get(url.pathname);
-            let content;
-            try { content = await readFile(fileURLToPath(new URL(`../web/${name}`, import.meta.url))); } catch { fail('not_found'); }
-            response.writeHead(200, { ...securityHeaders, 'Content-Type': type, ...(url.pathname === '/sw.mjs' ? { 'Service-Worker-Allowed': '/' } : {}) });
-            response.end(request.method === 'HEAD' ? undefined : content); return true;
+            const asset = await readStaticAsset(new URL(`../web/${name}`, import.meta.url));
+            response.writeHead(200, { ...securityHeaders, 'Content-Type': type, 'Content-Length': asset.length, ...(url.pathname === '/sw.mjs' ? { 'Service-Worker-Allowed': '/' } : {}) });
+            response.end(request.method === 'HEAD' ? undefined : asset); return true;
           }
           if (vendorFiles.has(url.pathname) && ['GET', 'HEAD'].includes(request.method) && !url.search) {
             const [relPath, type] = vendorFiles.get(url.pathname);
-            let content;
-            try { content = await readFile(fileURLToPath(new URL(relPath, import.meta.url))); } catch { fail('not_found'); }
-            response.writeHead(200, { ...securityHeaders, 'Content-Type': type });
-            response.end(request.method === 'HEAD' ? undefined : content); return true;
+            const asset = await readStaticAsset(new URL(relPath, import.meta.url));
+            response.writeHead(200, { ...securityHeaders, 'Content-Type': type, 'Content-Length': asset.length });
+            response.end(request.method === 'HEAD' ? undefined : asset); return true;
           }
           await ready;
           if (closed) fail('busy');
@@ -526,6 +542,20 @@ export function createWebFactory(config, dependencies = {}) {
             fail('not_found');
           }
           if (url.pathname === '/api/status' && request.method === 'GET') { json(response, 200, await jobs.status()); return true; }
+          if (url.pathname === '/api/gemini' && request.method === 'GET') {
+            if (url.search) fail('invalid_request');
+            json(response, 200, geminiApi.status()); return true;
+          }
+          if (url.pathname === '/api/gemini' && request.method === 'POST') {
+            if (url.search) fail('invalid_request');
+            const result = await geminiApi.configure(await body(request));
+            if (!geminiApi.isBudgetReached()) jobs?.clearProviderPause?.();
+            json(response, 200, result); return true;
+          }
+          if (url.pathname === '/api/gemini/test' && request.method === 'POST') {
+            if (url.search) fail('invalid_request');
+            json(response, 200, await geminiApi.test(await body(request))); return true;
+          }
           if (url.pathname === '/api/accounts' && request.method === 'GET') { json(response, 200, { accounts: accounts.list(), providers: accounts.registrations(), catalog: accounts.catalog(), oauthFailure: current.oauthFailure }); return true; }
           if (url.pathname === '/api/accounts' && request.method === 'POST') { json(response, 201, await accounts.add(await body(request))); return true; }
           if (url.pathname === '/api/drive' && request.method === 'GET') { json(response, 200, { ...drive.status(), oauthFailure: current.driveFailure ?? null }); return true; }
@@ -831,6 +861,12 @@ export function createWebFactory(config, dependencies = {}) {
         await mail?.close?.();
         await Promise.allSettled([...batches.values()].map(value => value.scanPromise).concat([...actions]).concat([...activeMutations]));
         conversations?.destroy?.();
+        conversationSession?.close?.();
+        rawLabelReader?.close?.();
+        rawProcessingReader?.close?.();
+        attachments?.close?.();
+        originalProvider?.close?.();
+        mailboxes?.close?.();
         await cache?.close?.();
         accounts?.close?.();
         index?.close?.();

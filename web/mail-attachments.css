@@ -32,18 +32,18 @@
   align-items: center;
   gap: 5px;
   font-size: .76rem;
-  padding: 4px 8px;
+  padding: 4px 10px;
   min-height: 28px;
-  border-radius: 6px;
-  background: #edf1ea;
-  color: var(--green, #184a46);
-  border: 1px solid var(--line, #d8e0d5);
+  border-radius: 9999px;
+  background: var(--accent-soft, #e8f0fe);
+  color: var(--green, #01529a);
+  border: 1px solid var(--line, #dfe5ed);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .mail-attachments-jump:hover {
-  background: #e1e8dc;
+  background: var(--surface-hover, #dbeafe);
 }
 
 .mail-attachment-grid {
@@ -59,15 +59,15 @@
   gap: 10px;
   flex-wrap: wrap;
   padding: 10px 14px;
-  border: 1px solid var(--line, #d8e0d5);
-  border-radius: 8px;
-  background: #fbfcf9;
+  border: 1px solid var(--line, #dfe5ed);
+  border-radius: 12px;
+  background: var(--surface-subtle, #f8fafc);
   transition: background 0.15s, border-color 0.15s;
 }
 
 .mail-attachment-card:hover {
-  background: #f4f7f2;
-  border-color: #bccbc0;
+  background: var(--surface-hover, #edf3fb);
+  border-color: var(--sage, #94a3b8);
 }
 
 .mail-attachment-info {
@@ -86,7 +86,7 @@
   line-height: 1.35;
   font-size: .82rem;
   font-weight: 600;
-  color: #243731;
+  color: var(--ink, #0f172a);
 }
 
 .mail-attachment-meta {
@@ -125,11 +125,11 @@
   max-width: min(960px, calc(100vw - 32px));
   max-height: min(90dvh, 880px);
   padding: 0;
-  border: 1px solid var(--line, #d8e0d5);
-  border-radius: 14px;
-  background: var(--paper, #fffef9);
-  color: #243731;
-  box-shadow: 0 24px 80px rgba(18, 45, 39, 0.28);
+  border: 1px solid var(--line, #dfe5ed);
+  border-radius: 16px;
+  background: var(--paper, #ffffff);
+  color: var(--ink, #0f172a);
+  box-shadow: var(--shadow-popover, 0 24px 80px rgba(15, 23, 42, 0.28));
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -140,7 +140,7 @@
 }
 
 .mail-attachment-dialog::backdrop {
-  background: rgba(18, 45, 39, 0.65);
+  background: rgba(7, 19, 34, 0.65);
   backdrop-filter: blur(2px);
 }
 
@@ -151,9 +151,9 @@
   gap: 10px;
   flex-wrap: wrap;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--line, #d8e0d5);
-  background: #f7f9f5;
-  border-radius: 13px 13px 0 0;
+  border-bottom: 1px solid var(--line, #dfe5ed);
+  background: var(--surface-subtle, #f1f5f9);
+  border-radius: 15px 15px 0 0;
 }
 
 .mail-attachment-dialog-title-area {
@@ -265,9 +265,10 @@
   font-size: .82rem;
   line-height: 1.6;
   padding: 16px;
-  background: #f4f6f3;
-  border: 1px solid #d9e2da;
-  border-radius: 6px;
+  background: var(--surface-subtle, #f1f5f9);
+  color: var(--ink, #0f172a);
+  border: 1px solid var(--line, #dfe5ed);
+  border-radius: 8px;
   white-space: pre-wrap;
   word-break: break-word;
   box-sizing: border-box;
@@ -318,9 +319,9 @@
   gap: 6px;
   flex-wrap: wrap;
   padding: 6px 10px;
-  background: #f1f4ef;
-  border: 1px solid #dce4da;
-  border-radius: 8px;
+  background: var(--surface-subtle, #f1f5f9);
+  border: 1px solid var(--line, #dfe5ed);
+  border-radius: 10px;
   max-width: 100%;
   box-sizing: border-box;
 }

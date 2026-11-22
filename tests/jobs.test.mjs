@@ -303,10 +303,52 @@ test('classification quota failures halt queued work of both kinds and reject la
     assert.equal(blocked.retryAt, activeError.retryAt);
   }
   assert.equal((await jobs.status()).retryAt, activeError.retryAt);
+  assert.equal(jobs.retryAuthentication(), false);
   await assert.rejects(jobs.submit(input(), 'phone'), error => error.code === 'quota_exhausted' && error.retryAt === activeError.retryAt);
   await assert.rejects(jobs.submit(classifierInput(), 'processor', 'classification'), error => error.code === 'quota_exhausted');
   assert.equal(classifications, 1);
   assert.equal(briefings, 0);
+});
+
+test('an explicit authentication retry permits a fresh job without replaying failed queued mail', async t => {
+  let rejectActive, runs = 0, signedIn = false;
+  const jobs = createJobs({}, request => {
+    runs++;
+    return signedIn ? result(request) : new Promise((resolve, reject) => { rejectActive = reject; });
+  });
+  t.after(() => jobs.close());
+  const first = await jobs.submit(input(), 'processor');
+  const waiting = await jobs.submit(input(), 'phone');
+  rejectActive(new MailHarborError('login_required'));
+  assert.equal((await completed(jobs, first.id, 'processor')).error.code, 'login_required');
+  assert.equal((await completed(jobs, waiting.id, 'phone')).error.code, 'login_required');
+  signedIn = true;
+  await assert.rejects(jobs.submit(input()), error => error.code === 'login_required');
+  assert.equal(jobs.retryAuthentication(), true);
+  assert.equal(jobs.retryAuthentication(), false);
+  const retry = await jobs.submit(input(), 'processor');
+  assert.equal((await completed(jobs, retry.id, 'processor')).status, 'completed');
+  assert.equal(jobs.get(waiting.id, 'phone').status, 'failed');
+  assert.equal(runs, 2);
+  await jobs.close();
+  assert.throws(() => jobs.retryAuthentication(), error => error.code === 'busy');
+});
+
+test('authentication retry keeps configuration failures blocked and renewed sign-in failures relatch', async t => {
+  for (const code of ['configuration_error', 'login_required']) {
+    let runs = 0;
+    const jobs = createJobs({}, async () => { runs++; throw new MailHarborError(code); });
+    t.after(() => jobs.close());
+    const first = await jobs.submit(input());
+    assert.equal((await completed(jobs, first.id)).error.code, code);
+    assert.equal(jobs.retryAuthentication(), code === 'login_required');
+    if (code === 'login_required') {
+      const retried = await jobs.submit(input());
+      assert.equal((await completed(jobs, retried.id)).error.code, code);
+    }
+    await assert.rejects(jobs.submit(input()), error => error.code === code);
+    assert.equal(runs, code === 'login_required' ? 2 : 1);
+  }
 });
 
 test('a short request throttle blocks all queued jobs until its persisted retry instead of five hours', async t => {

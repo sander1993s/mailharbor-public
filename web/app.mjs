@@ -5,6 +5,47 @@ import {observeSelects} from './controls.mjs';
 import {createApiRequest} from './api-request.mjs';
 import {createAccountSetup} from './account-setup.mjs';
 import {createAgyLoginView} from './agy-login.mjs';
+import {createGeminiSettingsView} from './gemini-settings.mjs';
+
+const THEME_STORAGE_KEY = 'mailharbor_theme';
+const systemDarkMedia = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-color-scheme: dark)')
+  : null;
+
+function readThemePreference() {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === 'dark' || saved === 'light' || saved === 'system') return saved;
+  } catch {}
+  return 'light';
+}
+
+function applyTheme(preference = readThemePreference()) {
+  const effective = preference === 'system' ? (systemDarkMedia?.matches ? 'dark' : 'light') : preference;
+  document.documentElement.dataset.theme = effective;
+  const metaTheme = document.getElementById('meta-theme-color');
+  if (metaTheme) metaTheme.setAttribute('content', effective === 'dark' ? '#071322' : '#01529a');
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) {
+    const isDark = effective === 'dark';
+    toggle.setAttribute('aria-pressed', String(isDark));
+    toggle.title = isDark ? 'Switch to light mode' : 'Switch to dark mode';
+    toggle.setAttribute('aria-label', toggle.title);
+  }
+  const select = document.getElementById('mail-theme-setting');
+  if (select && select.value !== preference) select.value = preference;
+}
+
+function setThemePreference(preference) {
+  const normalized = ['light', 'dark', 'system'].includes(preference) ? preference : 'light';
+  try { localStorage.setItem(THEME_STORAGE_KEY, normalized); } catch {}
+  applyTheme(normalized);
+}
+
+applyTheme();
+systemDarkMedia?.addEventListener?.('change', () => {
+  if (readThemePreference() === 'system') applyTheme('system');
+});
 
 observeSelects(document);
 
@@ -38,13 +79,14 @@ const notify = (text, type = '', code = '') => {
   $('notice').textContent = text;
   $('notice').className = `notice ${type}`;
   $('notice').hidden = !text;
-  if (code === 'login_required' && state.session) {
-    const link = make('a', 'Reconnect AI in Settings'); link.href = '#accounts';
+  if ((code === 'login_required' || code === 'quota_exhausted') && state.session) {
+    const targetId = code === 'quota_exhausted' ? 'gemini-settings' : 'agy-login';
+    const link = make('a', code === 'quota_exhausted' ? 'Review AI Spend Cap in Settings' : 'Configure AI in Settings'); link.href = '#accounts';
     link.addEventListener('click', event => {
       event.preventDefault();
       location.hash = '#accounts'; setPage();
-      $('agy-login').scrollIntoView({behavior: 'smooth', block: 'start'});
-      $('agy-login').focus({preventScroll: true});
+      $(targetId)?.scrollIntoView({behavior: 'smooth', block: 'start'});
+      $(targetId)?.focus({preventScroll: true});
     });
     $('notice').append(make('span', ' '), link);
   }
@@ -59,7 +101,8 @@ const ERROR_MESSAGES = {
   invalid_grant: 'This account needs a fresh sign-in. Reconnect it in Accounts.',
   oauth_not_configured: 'Set up this provider under Accounts → Provider registration first.',
   not_configured: 'Complete the connection settings in Accounts first.',
-  login_required: 'Your AI connection needs a fresh Google sign-in.',
+  login_required: 'Your AI connection needs configuration or a fresh sign-in.',
+  quota_exhausted: 'The AI spend cap or rate limit was reached. Check Direct Gemini API & Spend Cap in Settings.',
   stale_message: 'This email or mail view changed. Refresh mail or create a new briefing before trying again.',
   stale: 'This email changed since the briefing. Create a fresh briefing before changing it.',
   csrf: 'Your browser session changed. Reload MailHarbor and try again.',
@@ -74,6 +117,7 @@ function showLogin() {
   mailView.reset();
   filingView.reset();
   processingView.reset();
+  geminiSettingsView.reset();
   agyLoginView.reset();
   state.session = false;
   state.csrf = '';
@@ -112,13 +156,14 @@ function setPage() {
   }
   if (page === 'inbox' && state.session) mailView.show();
   else mailView.hide();
-  if (page === 'accounts' && state.session) { filingView.show(); processingView.show(); agyLoginView.show(); void mailView.renderSettings(outgoingSettings); }
-  else { filingView.hide(); processingView.hide(); agyLoginView.hide(); }
+  if (page === 'accounts' && state.session) { filingView.show(); processingView.show(); geminiSettingsView.show(); agyLoginView.show(); void mailView.renderSettings(outgoingSettings); }
+  else { filingView.hide(); processingView.hide(); geminiSettingsView.hide(); agyLoginView.hide(); }
   document.title = `${page === 'today' ? 'Briefings' : page === 'accounts' ? 'Accounts' : 'Inbox'} · MailHarbor`;
 }
 const mailView = createMailView({api, describeError});
 const filingView = createFilingView({root: $('invoice-filing'), api, describeError, notify});
 const processingView = createProcessingView({root: $('mail-processing'), api, describeError, notify});
+const geminiSettingsView = createGeminiSettingsView({root: $('gemini-settings'), api, describeError, onChanged: refreshStatus});
 const agyLoginView = createAgyLoginView({root: $('agy-login'), api, onConnected: refreshStatus});
 async function acceptSession(session) {
   if (session?.authenticated !== true || typeof session.csrf !== 'string' || !session.csrf) throw new Error('The server did not create a valid browser session.');
@@ -702,6 +747,13 @@ $('mail-search-form').addEventListener('submit', openMailFromToolbar, {capture: 
 $('mail-menu').addEventListener('click', openMailFromToolbar, {capture: true});
 $('mail-refresh').addEventListener('click', openMailFromToolbar, {capture: true});
 $('mail-advanced').addEventListener('click', openMailFromToolbar, {capture: true});
+$('theme-toggle')?.addEventListener('click', () => {
+  const current = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  setThemePreference(current === 'dark' ? 'light' : 'dark');
+});
+$('mail-theme-setting')?.addEventListener('change', () => {
+  setThemePreference($('mail-theme-setting').value);
+});
 window.addEventListener('hashchange', setPage);
 window.addEventListener('online', () => { if (state.session) { refreshStatus().catch(error => notifyError(error)); refreshJobs().catch(() => {}); } });
 window.addEventListener('offline', () => { $('connection').textContent = 'Offline'; $('connection').className = 'connection error'; notify('You are offline. Reconnect to Tailscale to load mail or check the briefing running on your homeserver.'); });

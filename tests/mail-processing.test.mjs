@@ -55,7 +55,7 @@ function seed(index, message, result, { nextAt = stamp, role = message.role, com
   return key;
 }
 function harness(t, { index = memoryIndex(), messages = [mail()], folders, classify: classifier, move, readError = false,
-  enqueueInvoice, store = { read: () => ({}) }, readerOverrides = {}, tagsOverrides = {}, autoSchedule = false,
+  enqueueInvoice, store = { read: () => ({}) }, readerOverrides = {}, tagsOverrides = {}, autoSchedule = false, jobs,
   accountStore = { list: () => [copy(account)], get: () => copy(account) } } = {}) {
   let current = stamp;
   const data = copy(messages);
@@ -89,7 +89,7 @@ function harness(t, { index = memoryIndex(), messages = [mail()], folders, class
   Object.assign(reader, readerOverrides);
   const processing = createMailProcessing({ index, store, accounts: accountStore, reader,
     tags: { async automatic(value) { metrics.tags.push(copy({ labels: value.labels, reference: value.reference })); }, manualFor: () => [], async observe() {}, ...tagsOverrides },
-    classify: async (request, signal) => { metrics.model.push(copy(request)); return classifier ? classifier(request, signal) : { items: request.messages.map(message => classification(message.id)) }; },
+    jobs, classify: jobs ? undefined : async (request, signal) => { metrics.model.push(copy(request)); return classifier ? classifier(request, signal) : { items: request.messages.map(message => classification(message.id)) }; },
     enqueueInvoice, now: () => current, autoSchedule });
   t.after(() => processing.close());
   return { processing, index, metrics, time(value) { current = Date.parse(value); },
@@ -948,6 +948,49 @@ test('marking cached read-error mail preserves review state without retrying bod
   assert.equal(result.counts.technicalFailures, 1); assert.equal(result.counts.needsReview, 0);
 });
 
+test('fresh matching headers at another location recover stale body reads using the verified reference', async t => {
+  for (const path of ['INBOX', 'Archive']) await t.test(path, async t => {
+    const index = memoryIndex(), old = mail(1, { unread: false });
+    const id = seed(index, old, null);
+    const record = index.get('messages', id);
+    Object.assign(record, { readError: 'stale_message', readAttempts: 1, readRetryAt: null, nextAt: null, review: true });
+    index.put('messages', id, record, { state: 'review', due: null });
+    const fresh = mail(2, { unread: false, folderPath: path, role: path === 'INBOX' ? 'inbox' : 'archive',
+      reference: { ...old.reference, path, uid: 2 } });
+    const h = harness(t, { index, messages: [fresh] });
+    await h.run('preview');
+    assert.deepEqual(h.metrics.reads, [fresh.reference]);
+    assert.equal(h.metrics.model.length, 1);
+    assert.equal(index.get('messages', id).readError, null);
+    assert.equal(index.get('messages', id).readAttempts, 0);
+    assert.equal(h.processing.status().counts.analyzed, 1);
+  });
+});
+
+test('rediscovery does not retry the same stale reference or replace owner decisions and move intents', async t => {
+  for (const mode of ['same-reference', 'owner-keep', 'move-intent', 'other-fingerprint', 'exhausted-classifier']) await t.test(mode, async t => {
+    const index = memoryIndex(), old = mail(1, { unread: false }), id = seed(index, old, null);
+    const record = index.get('messages', id);
+    Object.assign(record, { readError: 'stale_message', readAttempts: 1, readRetryAt: null, nextAt: null, review: true });
+    if (mode === 'owner-keep') record.ownerDecision = { action: 'keep', at: stamp - 1 };
+    if (mode === 'move-intent') record.locations[0].intent = { action: 'trash', at: stamp - 1 };
+    if (mode === 'exhausted-classifier') Object.assign(record, { classificationError: 'invalid_model_output', classificationAttempts: 3,
+      classificationRetryVersion: hash({ classifier: CLASSIFIER_VERSION, schema: SCHEMA_VERSION, prompt: PROMPT_VERSION }), retryAt: null });
+    index.put('messages', id, record, { state: 'review', due: null });
+    const fresh = mode === 'same-reference' ? old : mail(2, { unread: false, folderPath: 'Archive', role: 'archive',
+      reference: { ...old.reference, path: 'Archive', uid: 2, ...(mode === 'other-fingerprint' ? { fingerprint: hash('different-message') } : {}) } });
+    const h = harness(t, { index, messages: [fresh] });
+    await h.run('preview');
+    const after = index.get('messages', id);
+    assert.equal(after.classification, null);
+    assert.ok(h.metrics.reads.every(reference => reference.fingerprint !== old.reference.fingerprint));
+    if (mode === 'exhausted-classifier') assert.equal(after.classificationAttempts, 3);
+    else assert.equal(after.readError, 'stale_message');
+    if (mode === 'owner-keep') assert.deepEqual(after.ownerDecision, record.ownerDecision);
+    if (mode === 'move-intent') assert.deepEqual(after.locations[0].intent, record.locations[0].intent);
+  });
+});
+
 test('unfinished folder pages retain their UID high watermark and a later run starts a fresh arrival snapshot', async t => {
   const calls = [], messages = [mail(1), mail(2), mail(3)];
   const h = harness(t, { messages, readerOverrides: {
@@ -1221,6 +1264,69 @@ test('valid batches above one minute recover throughput, but near-timeout and pa
   const index = memoryIndex(); index.put('meta', 'processingSettings', { batchSize: 6, fastSuccesses: 2 });
   const partial = harness(t, { index, messages: [mail(1)] });
   assert.equal((await partial.run()).batchSize, 6);
+});
+
+test('classification growth uses current provider execution time without shared queue wait', async t => {
+  const index = memoryIndex(); index.put('meta', 'processingSettings', { batchSize: 1 });
+  let current = stamp, request;
+  const batches = [];
+  const jobs = {
+    async submit(value) { request = value; batches.push(value.messages.length); current += 115000; h.time(new Date(current).toISOString()); return { id: 'classification' }; },
+    get() { return { status: 'completed', result: { items: request.messages.map(message => classification(message.id)) },
+      metrics: { batchSize: request.messages.length, latencyMs: 20000, queueWaitMs: 95000 } }; },
+    cancel() {}, release() {}
+  };
+  const h = harness(t, { index, jobs, messages: Array.from({ length: 6 }, (_, offset) => mail(offset + 1)) });
+  await h.run();
+  assert.deepEqual(batches.slice(0, 4), [1, 1, 1, 2]);
+  assert.equal(h.processing.status().counts.analyzed, 6);
+  assert.equal(h.processing.status().metrics.lastBatch.latencyMs, 115000);
+  assert.equal(h.processing.status().metrics.lastBatch.providerLatencyMs, 20000);
+});
+
+test('batch growth falls back to elapsed time without reusing saved provider metrics', async t => {
+  const index = memoryIndex(); index.put('meta', 'processingSettings', { batchSize: 1,
+    metrics: { provider: { batchSize: 1, latencyMs: 1, queueWaitMs: 0 } } });
+  let current = stamp;
+  const h = harness(t, { index, messages: Array.from({ length: 4 }, (_, offset) => mail(offset + 1)), classify: request => {
+    current += 95000; h.time(new Date(current).toISOString());
+    return { items: request.messages.map(message => classification(message.id)) };
+  } });
+  await h.run();
+  assert.deepEqual(h.metrics.model.map(request => request.messages.length), [1, 1, 1, 1]);
+  assert.equal(h.processing.status().metrics.provider, null);
+  assert.equal(h.processing.status().metrics.lastBatch.providerLatencyMs, 95000);
+});
+
+test('an explicit processing resume reopens the provider authentication gate', async t => {
+  let request, blocked = false, fail = true, submissions = 0, retries = 0;
+  const jobs = {
+    retryAuthentication() { retries++; blocked = false; },
+    async submit(value) { if (blocked) throw new MailHarborError('login_required'); submissions++; request = value; return { id: 'classification' }; },
+    get() {
+      if (fail) { fail = false; blocked = true; return { status: 'failed', error: { code: 'login_required' } }; }
+      return { status: 'completed', result: { items: request.messages.map(message => classification(message.id)) } };
+    },
+    cancel() {}, release() {}
+  };
+  const h = harness(t, { jobs });
+  const stopped = await h.run();
+  assert.equal(stopped.pauseReason, 'login_required'); assert.equal(stopped.enabled, false);
+  assert.equal(submissions, 1); assert.equal(stopped.counts.analyzed, 0);
+  await h.processing.action('start'); await h.processing.drain();
+  assert.equal(retries, 2); assert.equal(submissions, 2);
+  assert.equal(h.processing.status().counts.analyzed, 1);
+  assert.equal(h.processing.status().pauseReason, null);
+});
+
+test('review retry timing includes the durable body read deadline', async t => {
+  const h = harness(t, { readerOverrides: { async readBatch(_, references) {
+    return { messages: [], errors: references.map(reference => ({ reference, code: 'mailbox_timeout' })) };
+  } } });
+  await h.run();
+  const retry = h.processing.reviewList({ category: 'retry' }).items;
+  assert.equal(retry.length, 1);
+  assert.equal(retry[0].nextAttempt, new Date(stamp + 15 * 60000).toISOString());
 });
 
 test('move and invoice holds never interrupt discovery or starve the real organizer with label polls', { timeout: 5000 }, async t => {

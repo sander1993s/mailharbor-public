@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#184a46">
+  <meta name="theme-color" id="meta-theme-color" content="#01529a">
   <meta name="description" content="All your inboxes in one private place, with cleanup you control.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>MailHarbor</title>
@@ -43,6 +43,8 @@
           <button id="mail-search-submit" type="submit" class="subtle" aria-label="Search mail" title="Search mail"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="sr-only">Search</span></button>
           <button id="mail-advanced" class="subtle" type="button" aria-label="Filters" aria-expanded="false" aria-controls="mail-advanced-search" title="Filters"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 6h7m4 0h5M4 12h2m4 0h10M4 18h10m4 0h2"/><circle cx="13" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="18" r="2"/></svg></button>
           <button id="mail-refresh" class="subtle" type="button" aria-label="Refresh mail" title="Refresh mail">↻</button>
+          <button id="mail-layout-toggle" class="subtle mail-layout-toggle" type="button" aria-label="Toggle split reading pane" aria-pressed="false" title="Toggle split reading pane"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></button>
+          <button id="theme-toggle" class="subtle theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="false" title="Toggle dark mode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
           <button id="mail-compose" class="primary mail-compose-action" type="button" aria-label="Compose a new message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z"/></svg><span>Compose</span></button>
         </form>
       </div>
@@ -50,6 +52,7 @@
         <h1 id="mail-title" class="sr-only">Inbox</h1>
         <div class="mail-workspace">
           <aside class="mail-sidebar" aria-label="Mailbox folders">
+            <button id="mail-sidebar-compose" class="primary mail-sidebar-compose" type="button" aria-label="Compose a new message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z"/></svg><span>Compose</span></button>
             <div class="mail-sidebar-heading"><span class="eyebrow">YOUR FOLDERS</span><span id="mail-connected" class="mail-connected"></span></div>
             <div class="mail-workspace-account-container">
               <label class="mail-account-field">
@@ -111,10 +114,19 @@
       <section id="accounts-page" hidden aria-labelledby="accounts-title">
         <h1 id="accounts-title" class="sr-only">Settings</h1>
         <div class="account-app-status"><button id="refresh-accounts" class="subtle">Refresh connections</button><span id="connection" class="connection" role="status">Connecting…</span><button id="install" class="subtle install" hidden>Install app</button></div>
+        <section id="gemini-settings" class="panel gemini-settings" aria-labelledby="gemini-settings-title" tabindex="-1"></section>
         <section id="agy-login" class="panel agy-login" aria-labelledby="agy-login-title" tabindex="-1"></section>
         <section class="panel mail-preferences" aria-labelledby="mail-preferences-title">
           <h2 id="mail-preferences-title">Mailbox settings</h2>
           <label class="mail-account-setting"><span>Show mail from</span><select id="mail-account" aria-label="Filter by account"><option value="">All accounts</option></select></label>
+          <label class="mail-account-setting">
+            <span>Appearance</span>
+            <select id="mail-theme-setting" aria-label="Appearance">
+              <option value="light">Light (Smet Blue)</option>
+              <option value="dark">Dark (Midnight Navy)</option>
+              <option value="system">Match system</option>
+            </select>
+          </label>
           <label class="mail-account-setting">
             <span>Display density</span>
             <select id="mail-density-setting" aria-label="Display density">
@@ -125,8 +137,8 @@
           <label class="mail-account-setting">
             <span>Reading mode</span>
             <select id="mail-reading-mode-setting" aria-label="Reading mode">
+              <option value="full">Full width (Gmail list)</option>
               <option value="split">Split pane (side by side)</option>
-              <option value="full">Full width (single message)</option>
             </select>
           </label>
           <label class="mail-account-setting">

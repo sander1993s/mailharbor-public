@@ -5,6 +5,7 @@ import { MAIL_CATEGORIES, POLICY_VERSION, computeMailDisposition, shouldRescueJu
 import { MailHarborError, safeError } from './validation.mjs';
 import { safeMailboxDiagnostic } from './mailboxes.mjs';
 import { CONTENT_EXTRACTION_VERSION } from './body.mjs';
+import { compactMailEvidence, EVIDENCE_VERSION } from './mail-evidence.mjs';
 import { PROCESSING_VERSION, MAX_ATTEMPTS, RETRY_DELAY, categoryOf, processingReasons, workMetadata } from './mail-processing-state.mjs';
 
 const INTERVAL = 15 * 60 * 1000;
@@ -239,13 +240,22 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
         const role = location.role;
         const record = existing ?? { key, accountId: account.id, email: email(account), discoveredAt: now(), message: null, reference: message.reference, receivedAt: message.receivedAt || message.date, locations: [], classification: null, complete: false, review: false, nextAt: now() };
         const position = record.locations.findIndex(value => locationKey(value.reference) === locationKey(message.reference));
+        // A terminal stale read cannot recover from the same failing reference.
+        // Fresh headers with the same immutable fingerprint at a new location can
+        // restore body analysis without trusting a changed UID or resetting AI retries.
+        const recoverSource = record.readError === 'stale_message' && position < 0 && !record.ownerDecision &&
+          !record.locations.some(value => value.intent) && locationKey(record.reference) !== locationKey(message.reference);
         if (position < 0) { record.locations.push(location); record.nextAt = now(); }
         else if (record.locations[position].handled === 'absent') record.locations[position] = location;
         else Object.assign(record.locations[position], { gmail: location.gmail, emailId: location.emailId });
         // Prefer an actionable location over Gmail's All Mail copy.
-        if (!record.message || ['inbox', 'sent', 'drafts', 'junk'].includes(role)) {
+        if (recoverSource || !record.message || ['inbox', 'sent', 'drafts', 'junk'].includes(role)) {
           record.reference = message.reference;
           record.message = Object.fromEntries(['accountId', 'account', 'folderPath', 'subject', 'author', 'to', 'date', 'unread', 'starred'].map(name => [name, message[name]]));
+        }
+        if (recoverSource) {
+          record.readError = null; record.readRetryAt = null; record.readAttempts = 0;
+          record.review = Boolean(record.classificationError);
         }
         records.set(key, record);
       }
@@ -332,6 +342,9 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
     }
   }
   async function model(messages) {
+    // Timings belong to this request. A failed submission or injected classifier
+    // must never leave an earlier fast response influencing batch growth.
+    settings.metrics ??= {}; settings.metrics.provider = null;
     if (classify) return classify({ messages }, signal());
     const owner = 'mail-processing', job = await jobs.submit({ messages }, owner, 'classification');
     try {
@@ -345,8 +358,69 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       }
     } finally { jobs.cancel(job.id, owner); jobs.release?.(job.id, owner); }
   }
+  function fullEvidenceNeeded(record, classification, account) {
+    if (record.sourceComplete !== true || !record.analysisEvidence?.omitted) return false;
+    // A compact category pass is useful on its own. Full source evidence is
+    // required before a move/rescue, for uncertain labels, or for event dates.
+    if (!classification.labels.length || classification.confidence < .9 ||
+        classification.labels.some(label => ['coupons', 'appointments', 'tenders'].includes(label))) return true;
+    const manualLabels = manualPolicyLabels(account, record.reference);
+    return record.locations.some(location => {
+      if (location.handled && !['changed', 'target_unavailable'].includes(location.handled)) return false;
+      if (location.role === 'junk') return shouldRescueJunk(classification, { complete: true });
+      const decision = computeMailDisposition({ classification, receivedAt: record.receivedAt, folderKind: location.role,
+        manualLabels, now: now(), tenderGraceMonths: settings.tenderGraceMonths, tenderGraceDays: settings.tenderGraceDays,
+        invoiceProtected: invoiceProtected(record), complete: true });
+      return decision.action !== 'hold';
+    });
+  }
+  async function measuredClassification(inputs, sourceCharacters, fallback = false) {
+    settings.metrics ??= {};
+    const totals = settings.metrics.classificationInput ??= { calls: 0, messages: 0, sourceCharacters: 0, bodyCharacters: 0, fallbackMessages: 0 };
+    totals.calls++; totals.messages += inputs.length;
+    totals.sourceCharacters += sourceCharacters;
+    totals.bodyCharacters += inputs.reduce((sum, message) => sum + message.body.length, 0);
+    if (fallback) totals.fallbackMessages += inputs.length;
+    // Count attempts as well as successes; retries consume input too. No mail
+    // text is retained in metrics or the durable message record.
+    try { return classificationResult(await model(inputs), { messages: inputs }); }
+    finally {
+      const provider = settings.metrics.provider;
+      for (const name of ['inputCharacters', 'promptCharacters', 'requestBytes']) {
+        if (provider?.inputMessages === inputs.length && Number.isSafeInteger(provider[name]) && provider[name] >= 0)
+          totals[name] = (totals[name] ?? 0) + provider[name];
+      }
+      save();
+    }
+  }
+  function persistClassifications(items, ready) {
+    if (!items.length) return;
+    index.transaction(() => {
+      for (const item of items) {
+        const value = ready.get(item.id); if (!value) throw new MailHarborError('invalid_model_output');
+        verify(value.account);
+        const old = value.record.classification;
+        // Improved reads cannot silently remove a previously protective category.
+        if (old) item.labels = [...new Set([...old.labels, ...item.labels])];
+        value.record.classification = item; value.record.classifiedAt = now(); value.record.classifierVersion = CLASSIFIER_VERSION; value.record.nextAt = now();
+        value.record.schemaVersion = SCHEMA_VERSION; value.record.promptVersion = PROMPT_VERSION; value.record.policyVersion = POLICY_VERSION;
+        value.record.classificationError = null; value.record.retryAt = null; value.record.refreshRequested = false;
+        value.record.fullEvidenceRequested = false; value.record.classificationAttempts = 0;
+        if (!old) count('analyzed');
+        settings.lastRun.classified = (settings.lastRun.classified ?? 0) + 1;
+        if (settings.maxClassifications != null) { settings.pilotCounters ??= {}; settings.pilotCounters.classified = (settings.pilotCounters.classified ?? 0) + 1; }
+        put(value.record);
+      }
+      advanced(); save();
+    });
+    // Each group came from a fully validated provider response, not a partial
+    // acceptance of malformed output. Later retries need only unresolved IDs.
+    for (const item of items) ready.delete(item.id);
+  }
   async function classifyPending() {
     if (ownerMutation) return false;
+    const fastMode = Boolean(jobs?.isFastMode?.());
+    if (!fastMode && settings.batchSize > 12) settings.batchSize = 12;
     let remaining = settings.maxClassifications == null ? settings.batchSize : Math.min(settings.batchSize, settings.maxClassifications - (settings.pilotCounters?.classified ?? 0));
     if (remaining <= 0) { settings.enabled = false; settings.pauseReason = 'pilot_complete'; return false; }
     const candidates = [], current = selected();
@@ -410,6 +484,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
         record.readError = null; record.readRetryAt = null;
         record.retryAt = null;
         record.complete = message.bodyUnavailable === false && message.truncated !== true && message.body.length <= 8000;
+        record.sourceComplete = record.complete;
         record.contentReasons = message.contentReasons ?? (record.complete ? [] : ['legacy_incomplete']);
         record.extractionVersion = message.extractionVersion ?? CONTENT_EXTRACTION_VERSION;
         if (record.refreshRequested) {
@@ -419,8 +494,24 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
           }
         }
         const source = { ...record.message, ...message };
-        inputs.push({ id: record.key, subject: source.subject || '', author: source.author || '', to: source.to || '', date: source.date || '', folderKind: record.locations.find(location => locationKey(location.reference) === locationKey(record.reference))?.role || 'other', body: String(message.body || '').slice(0, 8000), complete: record.complete });
-        ready.set(record.key, { record, account });
+        const fullInput = { id: record.key, subject: source.subject || '', author: source.author || '', to: source.to || '', date: source.date || '', folderKind: record.locations.find(location => locationKey(location.reference) === locationKey(record.reference))?.role || 'other', body: String(message.body || '').slice(0, 8000), complete: record.complete };
+        // Old, complete sources commonly need immediate retention evidence.
+        // Send them once in full rather than paying for excerpt + fuller passes.
+        // This routing heuristic never authorizes an action; policy still does.
+        const received = Date.parse(record.receivedAt);
+        const trashOnly = record.locations.length > 0 && record.locations.every(location => location.role === 'trash');
+        const sentLongHold = record.locations.length > 0 && record.locations.every(location => location.role === 'sent') &&
+          Number.isFinite(received) && received > now() - 2500 * 86400000;
+        const fullFirst = record.fullEvidenceRequested || (record.sourceComplete && (
+          record.locations.some(location => location.role === 'junk') ||
+          (!fastMode && !trashOnly && !sentLongHold && Number.isFinite(received) && received <= now() - 32 * 86400000)
+        ));
+        const evidence = compactMailEvidence(fullInput, { maxCharacters: fullFirst ? 8000 : 2000 });
+        record.complete = evidence.complete;
+        record.analysisEvidence = { version: EVIDENCE_VERSION, sourceCharacters: evidence.sourceCharacters,
+          inputCharacters: evidence.inputCharacters, omitted: evidence.omitted };
+        inputs.push({ ...fullInput, body: evidence.body, complete: evidence.complete });
+        ready.set(record.key, { record, account, fullInput });
       }
       for (const error of result.errors ?? []) {
         if (error.code === 'mailbox_login_required') continue;
@@ -446,12 +537,49 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
     const started = now();
     let result;
     try {
-      result = classificationResult(await model(request.messages), request);
+      result = await measuredClassification(request.messages, [...ready.values()].reduce((sum, value) => sum + value.fullInput.body.length, 0));
       if (!result?.items || result.items.length !== inputs.length) throw new MailHarborError('invalid_model_output');
+      const needsFull = result.items.filter(item => {
+        const { record, account } = ready.get(item.id);
+        return fullEvidenceNeeded(record, item, account);
+      });
+      const fullIds = new Set(needsFull.map(item => item.id));
+      persistClassifications(result.items.filter(item => !fullIds.has(item.id)), ready);
+      index.transaction(() => {
+        for (const item of needsFull) {
+          const value = ready.get(item.id);
+          value.record.fullEvidenceRequested = true;
+          put(value.record);
+        }
+      });
+      // Reuse the already verified body in memory instead of making a second
+      // IMAP read. Bound fuller passes by characters as well as message count.
+      let fuller = [], characters = 0;
+      const finishFuller = async () => {
+        if (!fuller.length) return;
+        for (const input of fuller) verify(ready.get(input.id).account);
+        const checked = await measuredClassification(fuller, 0, true);
+        for (const item of checked.items) {
+          const value = ready.get(item.id);
+          verify(value.account);
+          value.record.complete = value.fullInput.complete;
+          value.record.analysisEvidence = { version: EVIDENCE_VERSION, sourceCharacters: value.fullInput.body.length,
+            inputCharacters: value.fullInput.body.length, omitted: false };
+        }
+        persistClassifications(checked.items, ready);
+        fuller = []; characters = 0;
+      };
+      for (const item of needsFull) {
+        const input = ready.get(item.id).fullInput;
+        const size = JSON.stringify(input).length;
+        if (fuller.length && characters + size > 24000) await finishFuller();
+        fuller.push(input); characters += size;
+      }
+      await finishFuller();
     } catch (error) {
       if (signal().aborted || !['invalid_model_output', 'timeout', 'provider_error'].includes(error?.code)) throw error;
       for (const value of ready.values()) verify(value.account);
-      const single = inputs.length === 1 ? ready.get(inputs[0].id) : null;
+      const single = ready.size === 1 ? [...ready.values()][0] : null;
       index.transaction(() => {
         recordError(error, single?.account);
         if (single) {
@@ -467,7 +595,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
         } else {
           // No part of an invalid batch is accepted. Retry a smaller bounded batch
           // until a malformed individual reply can be isolated without guessing.
-          settings.batchSize = Math.max(1, Math.floor(Math.min(settings.batchSize, inputs.length) / 2));
+          settings.batchSize = Math.max(1, Math.floor(Math.min(settings.batchSize, ready.size) / 2));
         }
         settings.fastSuccesses = 0;
         for (const value of ready.values()) put(value.record);
@@ -486,32 +614,28 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
         const paused = new MailHarborError('timeout'); paused[RECORDED_CLASSIFICATION_FAILURE] = true; throw paused; }
       return true;
     }
-    // Persist validated classification before applying labels or IMAP actions.
+    // All independently validated groups were checkpointed before reaching here.
     index.transaction(() => {
       settings.timeoutStreak = 0;
       settings.invalidSingleStreak = 0;
       settings.probeKey = null; settings.breakerFailures = 0; settings.retryAt = null; settings.pauseReason = null;
       const elapsed = Math.max(0, now() - started);
-      settings.metrics ??= {}; settings.metrics.lastBatch = { messages: inputs.length, latencyMs: elapsed, at: new Date(now()).toISOString() };
+      const provider = settings.metrics?.provider;
+      const providerElapsed = provider?.batchSize === inputs.length && Number.isFinite(provider.latencyMs) && provider.latencyMs >= 0 ? provider.latencyMs : elapsed;
+      settings.metrics ??= {}; settings.metrics.lastBatch = { messages: inputs.length, latencyMs: elapsed, providerLatencyMs: providerElapsed, at: new Date(now()).toISOString() };
       settings.classificationBatches = (settings.classificationBatches ?? 0) + 1;
       // CLI startup is a substantial fixed cost. A valid 60–90 second batch
       // still has headroom under the provider timeout and must be able to grow.
-      settings.fastSuccesses = elapsed < BATCH_GROWTH_LATENCY && inputs.length === settings.batchSize ? (settings.fastSuccesses ?? 0) + 1 : 0;
-      if (settings.fastSuccesses >= 3) { settings.batchSize = Math.min(12, settings.batchSize + (settings.batchSize < 3 ? 1 : 3)); settings.fastSuccesses = 0; }
-      for (const item of result.items) {
-        const value = ready.get(item.id); if (!value) throw new MailHarborError('invalid_model_output');
-        verify(value.account);
-        const old = value.record.classification;
-        // Improved reads cannot silently remove a previously protective category.
-        if (old) item.labels = [...new Set([...old.labels, ...item.labels])];
-        value.record.classification = item; value.record.classifiedAt = now(); value.record.classifierVersion = CLASSIFIER_VERSION; value.record.nextAt = now();
-        value.record.schemaVersion = SCHEMA_VERSION; value.record.promptVersion = PROMPT_VERSION; value.record.policyVersion = POLICY_VERSION;
-        value.record.classificationError = null; value.record.retryAt = null; value.record.refreshRequested = false;
-        value.record.classificationAttempts = 0;
-        if (!old) count('analyzed');
-        settings.lastRun.classified = (settings.lastRun.classified ?? 0) + 1;
-        if (settings.maxClassifications != null) { settings.pilotCounters ??= {}; settings.pilotCounters.classified = (settings.pilotCounters.classified ?? 0) + 1; }
-        put(value.record);
+      // Notifications share the provider queue; their wait is not evidence that
+      // this classification batch is close to its own execution timeout.
+      const maxBatch = fastMode ? 35 : 12;
+      settings.fastSuccesses = providerElapsed < BATCH_GROWTH_LATENCY && inputs.length === settings.batchSize ? (settings.fastSuccesses ?? 0) + 1 : 0;
+      if (fastMode && providerElapsed < 15000 && settings.fastSuccesses >= 2) {
+        settings.batchSize = Math.min(maxBatch, Math.max(20, settings.batchSize * 2));
+        settings.fastSuccesses = 0;
+      } else if (settings.fastSuccesses >= 3) {
+        settings.batchSize = Math.min(maxBatch, settings.batchSize + (settings.batchSize < 3 ? 1 : 3));
+        settings.fastSuccesses = 0;
       }
       advanced();
       save();
@@ -536,6 +660,12 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
     }
     const manualLabels = manualPolicyLabels(account, record.reference);
     const context = { account, record, nextAt: null, review: false, actions: [], pending: 0 };
+    if (record.sourceComplete === true && record.analysisEvidence?.omitted && fullEvidenceNeeded(record, record.classification, account)) {
+      record.fullEvidenceRequested = true; record.refreshRequested = true;
+      record.nextAt = now(); record.retryAt = null; record.review = false;
+      put(record);
+      return context;
+    }
     if (settings.mode === 'apply' && record.locations.some(location => !location.read && location.handled !== 'absent')) {
       // Classification and labels can proceed during a provider flag failure,
       // but a message is not moved until its requested read flag is verified.
@@ -553,7 +683,14 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
     }
     for (const aliases of groups.values()) {
       const options = aliases.map(location => {
-        const decision = computeMailDisposition({ classification: record.classification, receivedAt: record.receivedAt, folderKind: location.role, manualLabels, now: now(), tenderGraceMonths: settings.tenderGraceMonths, tenderGraceDays: settings.tenderGraceDays, invoiceProtected: invoiceProtected(record), complete: record.complete });
+        const options = { classification: record.classification, receivedAt: record.receivedAt, folderKind: location.role, manualLabels, now: now(), tenderGraceMonths: settings.tenderGraceMonths, tenderGraceDays: settings.tenderGraceDays, invoiceProtected: invoiceProtected(record), complete: record.complete };
+        const decision = computeMailDisposition(options);
+        if (record.sourceComplete === true && record.analysisEvidence?.omitted && decision.reason === 'incomplete_message') {
+          const potential = computeMailDisposition({ ...options, complete: true });
+          // Schedule a fuller review at the existing deadline. This hypothetical
+          // decision only sets a wake-up; it can never authorize a provider move.
+          if (potential.dueAt && Date.parse(potential.dueAt) > now()) decision.dueAt = potential.dueAt;
+        }
         const action = location.role === 'junk' ? (shouldRescueJunk(record.classification, { complete: record.complete }) ? 'rescue' : 'hold') : decision.action;
         return { location, decision, action };
       });
@@ -1021,7 +1158,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       return { items: rows.slice(0, 50).filter(row => categoryOf(row.value) === category && eligibleAccount(row.value)).map(({ key, value: record }) => ({
         id: key, account: record.message?.account ?? eligibleAccount(record).label, subject: record.message?.subject ?? '', author: record.message?.author ?? '',
         date: record.message?.date ?? '', category, reasons: record.blockers ?? [], contentReasons: record.contentReasons ?? [], complete: record.complete === true,
-        labels: record.classification?.labels ?? [], dates: record.classification?.dates ?? {}, nextAttempt: record.retryAt == null ? null : new Date(record.retryAt).toISOString()
+        labels: record.classification?.labels ?? [], dates: record.classification?.dates ?? {}, nextAttempt: (record.readError ? record.readRetryAt : record.retryAt) == null ? null : new Date(record.readError ? record.readRetryAt : record.retryAt).toISOString()
       })), nextAfter: rows.length > 50 ? rows[49].key : null };
     },
     async resolveReview(input) {
@@ -1113,6 +1250,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       settingsEpoch++;
       if (settings.providerConsent !== true) throw new MailHarborError('configuration_error');
       if (fault || index.healthy?.() === false) throw new MailHarborError('configuration_error');
+      jobs?.retryAuthentication?.();
       settings.enabled = true; settings.mode = action === 'preview' ? 'preview' : 'apply';
       if (settings.pauseReason !== 'quota_exhausted') settings.retryAt = null;
       if (action === 'preview') settings.preview = { sampleSize: 0, labels: {}, counts: { archive: 0, trash: 0, markRead: 0, rescue: 0, review: 0 } };

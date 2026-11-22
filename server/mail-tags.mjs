@@ -260,16 +260,18 @@ function createLegacyTags({ store, now = () => Date.now() }) {
         } catch (error) { if (error !== NO_CHANGE) throw error; }
       });
     },
-    entries(accounts, { tag, query = '' } = {}) {
+    entries(accounts, { tag, anyTags, query = '' } = {}) {
       const selected = accountsFor(accounts);
       if ((tag !== undefined && !validTag(store, tag)) || typeof query !== 'string' || query.length > 200 || /[\u0000-\u001f\u007f]/u.test(query)) fail('invalid_request');
-      const data = store.read(), current = index(data), search = query.trim().toLowerCase();
+      const data = store.read(), current = index(data), search = query.trim().toLowerCase(), available = availableTags(data);
+      if (anyTags !== undefined && (!Array.isArray(anyTags) || anyTags.length > available.size || anyTags.some(id => !available.has(id)))) fail('invalid_request');
       return Object.entries(current.entries).filter(([, entry]) => {
         const identity = selected.get(entry.accountId)?.identity;
+        const values = tagValues(entry, available);
         return identity && identity.email === entry.email && sameAccount(data, identity) &&
-          tagValues(entry, availableTags(data)).length && (!tag || tagValues(entry, availableTags(data)).includes(tag)) && (!search || [entry.message.subject, entry.message.author, entry.message.to].some(value => value.toLowerCase().includes(search)));
+          values.length && (!tag || values.includes(tag)) && (anyTags === undefined || anyTags.some(id => values.includes(id))) && (!search || [entry.message.subject, entry.message.author, entry.message.to].some(value => value.toLowerCase().includes(search)));
       }).map(([key, entry]) => ({
-        message: { id: `tag-${key}`, ...structuredClone(entry.message), tags: tagValues(entry, availableTags(data)) },
+        message: { id: `tag-${key}`, ...structuredClone(entry.message), tags: tagValues(entry, available) },
         reference: structuredClone(entry.reference)
       })).sort((a, b) => {
         const first = Date.parse(a.message.date) || 0, second = Date.parse(b.message.date) || 0;
@@ -369,13 +371,14 @@ function createDurableTags({ store, durable, now }) {
       const data = store.read();
       return durable.tagCount(accounts.map(accountIdentity).filter(identity => sameAccount(data, identity)).map(identity => `${identity.accountId}:${identity.email}`), tag);
     },
-    entries(accounts, { tag, query = '' } = {}) {
+    entries(accounts, { tag, anyTags, query = '' } = {}) {
       if ((tag !== undefined && !validTag(store, tag)) || typeof query !== 'string' || query.length > 200) fail('invalid_request');
-      const data = store.read(), search = query.toLowerCase().trim();
+      const data = store.read(), search = query.toLowerCase().trim(), available = availableTags(data);
+      if (anyTags !== undefined && (!Array.isArray(anyTags) || anyTags.length > available.size || anyTags.some(id => !available.has(id)))) fail('invalid_request');
       const owners = [...accountsFor(accounts).values()].map(value => value.identity).filter(identity => sameAccount(data, identity)).map(identity => `${identity.accountId}:${identity.email}`);
-      return durable.tagEntries(owners, tag).filter(({ value }) => !search || [value.message.subject, value.message.author, value.message.to].some(text => text.toLowerCase().includes(search)))
-        .map(({ key, value }) => ({ message: { id: `tag-${key}`, ...value.message, tags: tagValues(value, availableTags(data)) }, reference: value.reference }))
-        .filter(entry => entry.message.tags.length > 0);
+      return durable.tagEntries(owners, tag ?? anyTags).filter(({ value }) => !search || [value.message.subject, value.message.author, value.message.to].some(text => text.toLowerCase().includes(search)))
+        .map(({ key, value }) => ({ message: { id: `tag-${key}`, ...value.message, tags: tagValues(value, available) }, reference: value.reference }))
+        .filter(entry => entry.message.tags.length > 0 && (anyTags === undefined || anyTags.some(id => entry.message.tags.includes(id))));
     }
   };
 }

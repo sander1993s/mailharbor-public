@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createMailReader } from '../server/mail-reader.mjs';
+import { mailFingerprint } from '../server/mailboxes.mjs';
 import { MAX_ATTACHMENT_BYTES } from '../server/mail-attachments.mjs';
 import { searchCompiler } from '../node_modules/imapflow/dist/esm/search-compiler.js';
 import fetchCommand from '../node_modules/imapflow/dist/esm/commands/fetch.js';
@@ -1009,6 +1010,106 @@ test('excluded label fingerprints stay account-scoped and win over the inclusion
     await assert.rejects(h.reader.list(h.accounts, { excludedReferences: invalid }), { code: 'invalid_request' });
   }
   await assert.rejects(h.reader.list(h.accounts, { excludedReferences: [{ ...excludedReferences[0], fingerprint: 'bad' }] }), { code: 'stale_message' });
+});
+
+test('large label-filtered inbox pages fetch recent matches without scanning historic headers to count', async () => {
+  const messages = Array.from({ length: 6000 }, (_, index) => mail(index + 1, {
+    envelope: { date: new Date('2020-01-01'), subject: `Old ${index + 1}` }
+  }));
+  for (let index = 0; index < 140; index++) messages[index] = mail(index + 1);
+  const reference = message => ({ accountId: 'a', path: 'INBOX', uidValidity: '1', uid: message.uid, fingerprint: mailFingerprint(message) });
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages }] } });
+  const options = { scopedReferences: messages.slice(0, 300).map(reference), excludedReferences: messages.slice(0, 20).map(reference), limit: 50, includeAttachments: true };
+  const first = await h.reader.list(h.accounts, options);
+  assert.deepEqual(first.messages.map(message => message.reference.uid), Array.from({ length: 50 }, (_, index) => index + 21));
+  assert.equal(first.total, null); assert.equal(first.totalComplete, false); assert.ok(first.nextCursor);
+  const second = await h.reader.list(h.accounts, { ...options, cursor: first.nextCursor });
+  assert.deepEqual(second.messages.map(message => message.reference.uid), Array.from({ length: 50 }, (_, index) => index + 71));
+  assert.equal(second.total, null); assert.equal(second.totalComplete, false);
+  assert.equal(h.calls.filter(call => call.action === 'headers').reduce((sum, call) => sum + call.uids.length, 0), 280);
+  const third = await h.reader.list(h.accounts, { ...options, cursor: second.nextCursor });
+  assert.equal(third.total, 280); assert.equal(third.totalComplete, true);
+  assert.equal(new Set([...first.messages, ...second.messages, ...third.messages].map(message => message.id)).size, 150);
+});
+
+test('exclusion-only windows expand past excluded recent messages and keep totals honest', async () => {
+  const messages = Array.from({ length: 2000 }, (_, index) => mail(index + 1, {
+    envelope: { date: new Date('2020-01-01'), subject: `Old ${index + 1}` }
+  }));
+  for (let index = 0; index < 120; index++) messages[index] = mail(index + 1, {
+    envelope: { date: new Date(NOW - (index < 60 ? 0 : 10 * DAY) - index * 60000), subject: `Recent ${index}` }
+  });
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages }] } });
+  const excludedReferences = messages.slice(0, 60).map(message => ({ accountId: 'a', path: 'INBOX', uidValidity: '1', uid: message.uid, fingerprint: mailFingerprint(message) }));
+  const result = await h.reader.list(h.accounts, { excludedReferences, limit: 50 });
+  assert.deepEqual(result.messages.map(message => message.reference.uid), Array.from({ length: 50 }, (_, index) => index + 61));
+  assert.equal(result.total, null); assert.equal(result.totalComplete, false);
+  assert.equal(h.calls.filter(call => call.action === 'headers').reduce((sum, call) => sum + call.uids.length, 0), 120);
+});
+
+test('multi-folder label windows deduplicate aliases without rescanning their historic copies', async () => {
+  const messages = Array.from({ length: 1000 }, (_, index) => mail(index + 1, {
+    envelope: { date: new Date('2020-01-01'), subject: `Old ${index + 1}` }
+  }));
+  for (let index = 0; index < 120; index++) messages[index] = mail(index + 1);
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages }, { path: 'Projects', messages: messages.map(message => ({ ...message, uid: message.uid + 5000 })) }] } });
+  const scopedReferences = messages.slice(0, 300).map(message => ({ accountId: 'a', path: 'Projects', uidValidity: '1', uid: message.uid + 5000, fingerprint: mailFingerprint(message) }));
+  const first = await h.reader.list(h.accounts, { folder: 'all', scopedReferences, limit: 50 });
+  assert.equal(first.totalComplete, false); assert.equal(first.total, null);
+  const updatedReferences = scopedReferences.map(reference => ({ ...reference, path: 'INBOX', uid: reference.uid - 5000 }));
+  const next = await h.reader.list(h.accounts, { folder: 'all', scopedReferences: updatedReferences, limit: 50, cursor: first.nextCursor });
+  assert.deepEqual([...first.messages, ...next.messages].map(message => message.reference.uid), Array.from({ length: 100 }, (_, index) => index + 1));
+  assert.equal(h.calls.filter(call => call.action === 'headers').reduce((sum, call) => sum + call.uids.length, 0), 480);
+});
+
+test('a sparse account stops at the proven unified page boundary instead of seeking 51 local matches', async () => {
+  const recent = Array.from({ length: 120 }, (_, index) => mail(index + 1));
+  const historic = Array.from({ length: 6000 }, (_, index) => mail(index + 1, {
+    envelope: { date: new Date('2020-01-01'), subject: `Historic ${index + 1}` }
+  }));
+  // Account b has plenty of labeled history, but only one recent matching mail.
+  // Its other recent mail still has to be checked before older mail can be skipped.
+  for (let index = 0; index < 120; index++) historic[index] = mail(index + 1);
+  let release;
+  const ready = new Promise(resolve => { release = resolve; });
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages: recent }], onHeader(uid) { if (uid === 120) setImmediate(release); } },
+    b: { folders: [{ path: 'INBOX', messages: historic }], onConnect: () => ready } });
+  const references = (accountId, messages) => messages.map(message => ({ accountId, path: 'INBOX', uidValidity: '1', uid: message.uid, fingerprint: mailFingerprint(message) }));
+  const scopedReferences = [...references('a', recent), ...references('b', [historic[0], ...historic.slice(120, 420)])];
+  const first = await h.reader.list(h.accounts, { scopedReferences, limit: 50 });
+  assert.equal(first.totalComplete, false); assert.equal(first.total, null); assert.ok(first.nextCursor);
+  assert.equal(first.messages.length, 50); assert.equal(first.messages.filter(message => message.accountId === 'b').length, 1);
+  assert.equal(h.calls.filter(call => call.action === 'headers').reduce((sum, call) => sum + call.uids.length, 0), 240);
+  const second = await h.reader.list(h.accounts, { scopedReferences, limit: 50, cursor: first.nextCursor });
+  assert.equal(new Set([...first.messages, ...second.messages].map(message => message.id)).size, 100);
+  assert.equal(second.messages.every(message => message.accountId === 'a'), true);
+  assert.equal(h.calls.filter(call => call.action === 'headers').reduce((sum, call) => sum + call.uids.length, 0), 480);
+});
+
+test('sparse historic inclusions verify saved UIDs and skip accounts outside the label scope', async () => {
+  const messages = Array.from({ length: 10000 }, (_, index) => mail(index + 1, {
+    envelope: { date: new Date('2020-01-01'), subject: `Old ${index + 1}` }
+  }));
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages }] }, b: { onConnect() { assert.fail('Unrelated account must not connect.'); } } });
+  const scopedReferences = [messages[5000], messages[8000]].map(message => ({ accountId: 'a', path: 'INBOX', uidValidity: '1', uid: message.uid, fingerprint: mailFingerprint(message) }));
+  const first = await h.reader.list(h.accounts, { scopedReferences, limit: 1 });
+  assert.equal(first.total, 2); assert.equal(first.totalComplete, true); assert.deepEqual(first.errors, []);
+  const second = await h.reader.list(h.accounts, { scopedReferences, limit: 1, cursor: first.nextCursor });
+  assert.deepEqual([first.messages[0].reference.uid, second.messages[0].reference.uid].sort((a, b) => a - b), [5001, 8001]); assert.equal(second.nextCursor, null);
+  assert.equal(h.calls.filter(call => call.action === 'headers').reduce((sum, call) => sum + call.uids.length, 0), 4);
+});
+
+test('saved UID fast path falls back for changed fingerprints and paginates stably when saved aliases change', async () => {
+  const duplicate = mail(1), second = mail(2);
+  const h = harness({ a: { folders: [{ path: 'INBOX', messages: [duplicate, second, { ...duplicate, uid: 9 }] }] } });
+  const reference = message => ({ accountId: 'a', path: 'INBOX', uidValidity: '1', uid: message.uid, fingerprint: mailFingerprint(message) });
+  const references = [reference(duplicate), reference(second)];
+  const first = await h.reader.list(h.accounts, { scopedReferences: references, limit: 1 });
+  const next = await h.reader.list(h.accounts, { scopedReferences: [{ ...references[0], uid: 9 }, references[1]], limit: 1, cursor: first.nextCursor });
+  assert.equal(next.nextCursor, null); assert.equal(next.messages[0].reference.fingerprint, references[1].fingerprint);
+  const recovered = await h.reader.list(h.accounts, { scopedReferences: [{ ...references[0], uid: 2 }] });
+  assert.equal(recovered.messages.length, 1); assert.equal(recovered.messages[0].reference.fingerprint, references[0].fingerprint);
+  assert.notEqual(recovered.messages[0].reference.uid, 2);
 });
 
 test('content reader reads complete plain text and returns structured contract without marking seen', async () => {

@@ -45,6 +45,7 @@ const REASONS = {
   provider_consent_required: 'Message analysis needs your Gemini permission before it can start.',
   tender_rule_required: 'The delay after a tender deadline still needs to be set. Tenders with a deadline stay in place while other mail follows its rules.',
   mailbox_login_required: 'Reconnect the affected mailbox in Accounts. Saved progress is retained.',
+  login_required: 'The AI connection needs a fresh sign-in. Open Settings → AI connection to reconnect, then resume processing. Saved progress is retained.',
   processing_error: 'Processing could not finish this pass. Saved progress is retained.',
   invalid_model_output: 'Gemini replies could not be validated. Successful analysis is saved. Retry processing after checking the failure details.',
   response_schema: 'Gemini replies did not match the required response format.',
@@ -113,6 +114,7 @@ export function createProcessingView({root, api, describeError, notify}) {
     nodes.counts = make('dl', undefined, 'processing-counts'); root.append(nodes.counts);
     nodes.lastRun = make('p', undefined, 'fineprint'); root.append(nodes.lastRun);
     nodes.coverage = make('p', undefined, 'fineprint'); root.append(nodes.coverage);
+    nodes.performance = make('p', undefined, 'fineprint'); nodes.performance.hidden = true; root.append(nodes.performance);
     nodes.reasonCounts = make('dl', undefined, 'processing-reasons'); root.append(nodes.reasonCounts);
     nodes.diagnostics = make('details', undefined, 'processing-diagnostics');
     nodes.diagnostics.append(make('summary', 'Recent processing errors'));
@@ -179,6 +181,14 @@ export function createProcessingView({root, api, describeError, notify}) {
     if (Number.isSafeInteger(lastRun?.errorCount) && lastRun.errorCount >= 0) nodes.lastRun.textContent += ` Errors in this run: ${count(lastRun.errorCount)}.`;
     const coverage = Array.isArray(data?.accounts) ? data.accounts : [];
     nodes.coverage.textContent = ['Analysis counts describe unique messages. Holds and decisions may concern already analyzed mail; provider action totals are separate.', ...coverage.map(account => `${account.label || account.account || account.id}: ${account.discoveryComplete === true ? 'discovery complete' : 'discovery incomplete'}${account.reason ? ` (${reasonText(account.reason)})` : ''}.`)].join(' ');
+    const analyzed = data?.counts?.analyzed, discovered = data?.counts?.discovered;
+    const batch = data?.metrics?.lastBatch;
+    const batchValid = Number.isSafeInteger(batch?.messages) && batch.messages > 0 &&
+      Number.isSafeInteger(batch?.latencyMs) && batch.latencyMs > 0 && Boolean(dateText(batch.at));
+    const analysisProgress = Number.isSafeInteger(analyzed) && analyzed >= 0 && Number.isSafeInteger(discovered) && discovered > 0 && analyzed <= discovered
+      ? `${(100 * analyzed / discovered).toFixed(1)}% of discovered messages analyzed.` : '';
+    nodes.performance.textContent = [analysisProgress, batchValid ? `Last successful AI batch: ${count(batch.messages)} messages in ${(batch.latencyMs / 1000).toFixed(1)} seconds (${dateText(batch.at)}), including queue wait. This excludes mailbox reads and actions.` : ''].filter(Boolean).join(' ');
+    nodes.performance.hidden = !nodes.performance.textContent;
     nodes.reasonCounts.replaceChildren();
     for (const [reason, total] of Object.entries(data?.reasonCounts || {})) {
       if (!Number.isSafeInteger(total) || total < 1) continue;
@@ -189,7 +199,8 @@ export function createProcessingView({root, api, describeError, notify}) {
     nodes.diagnostics.hidden = !errors.length;
     for (const error of errors) {
       const details = [dateText(error.at), error.accountId, reasonText(error.code), error.phase ? `During ${String(error.phase).replaceAll('_', ' ')}` : '',
-        error.diagnostic?.stage, error.diagnostic?.reason].filter(value => typeof value === 'string' && value);
+        error.diagnostic?.stage, error.diagnostic?.reason, error.mailboxDiagnostic?.command,
+        error.mailboxDiagnostic?.reason, error.mailboxDiagnostic?.transportCode].filter(value => typeof value === 'string' && value);
       nodes.errorList.append(make('li', details.join(' · ')));
     }
     nodes.preview.replaceChildren(); nodes.preview.hidden = !data?.preview;

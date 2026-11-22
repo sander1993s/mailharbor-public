@@ -31,7 +31,7 @@ function protectedFolder(folder, account) {
 
 /** Applies owned labels, or one explicitly chosen primary folder, without COPY/EXPUNGE fallbacks. */
 export function createMailLabelReader({ connectionOptions, createClient, sessionTimeoutMs } = {}) {
-  const { session, active } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
+  const { session, active, close } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
 
   async function sync(account, entries, { signal, verify, beforeMove, onResult = async () => {} } = {}) {
     if (!account || typeof account.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(account.id) || !Array.isArray(entries) || entries.length > 25 ||
@@ -276,5 +276,5 @@ export function createMailLabelReader({ connectionOptions, createClient, session
       return { results };
     });
   }
-  return { sync };
+  return { sync, close };
 }

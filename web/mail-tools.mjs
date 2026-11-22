@@ -71,7 +71,7 @@ export function createMailTools({api, describeError, state, refresh, renderList,
   let host = null, selectionHost = null, readerHost = null, readerMessage = null, generation = 0, busy = false, confirmation = null;
   let settingsHost = null, advancedButton = null, advancedPanel = null, advancedFirst = null, advancedBinding = null;
   let undoTokens = [], filterDraft = null, advancedOpen = false, advancedExpanded = false, managerOpen = false, notificationsOpen = false, lastShape = '';
-  let notificationState = '', pollTimer = null, polling = false, updateRevision = null, pollGeneration = 0, viewKey = '';
+  let notificationState = '', pollTimer = null, polling = false, updateRevision = null, pendingProviderUpdate = false, pollGeneration = 0, viewKey = '';
   let providerData = null, providerMessageId = null;
   let providerDialog = null;
   let labelSync = null, labelSyncBusy = false, labelSyncError = '', labelSyncControls = null, labelSyncAction = false;
@@ -199,6 +199,19 @@ export function createMailTools({api, describeError, state, refresh, renderList,
     filterDraft.allFolders = criteria.allFolders === true;
     filterDraft.sort = criteria.sort ?? 'date_desc';
     draw(true);
+  }
+  function pruneLabelCriteria(availableIds) {
+    if (!filterDraft) return;
+    const available = new Set(availableIds);
+    let changed = false;
+    for (const key of ['includeLabels','excludeLabels']) {
+      if (!Array.isArray(filterDraft[key])) continue;
+      const retained = filterDraft[key].filter(id => available.has(id));
+      if (retained.length === filterDraft[key].length) continue;
+      filterDraft[key] = retained;
+      changed = true;
+    }
+    if (changed) draw(true);
   }
   function setUndo(tokens) { undoTokens = (Array.isArray(tokens) ? tokens : [tokens]).filter(value => typeof value === 'string' && value).slice(0,50); updateControls(); }
   function refreshAll() { return refresh?.({refreshMetadata:true}); }
@@ -699,7 +712,7 @@ export function createMailTools({api, describeError, state, refresh, renderList,
     const panel = confirmationPanel(); if (panel) section.append(panel);
     readerHost.append(section);
   }
-  function stop() { polling = false; pollGeneration++; clearTimeout(pollTimer); pollTimer = null; updateRevision = null; }
+  function stop() { polling = false; pollGeneration++; clearTimeout(pollTimer); pollTimer = null; updateRevision = null; pendingProviderUpdate = false; }
   function schedule() { if (polling) { pollTimer = setTimeout(poll,30000); pollTimer.unref?.(); } }
   async function poll() {
     if (!polling) return;
@@ -710,8 +723,16 @@ export function createMailTools({api, describeError, state, refresh, renderList,
       if (!polling || version !== generation || pollVersion !== pollGeneration) return;
       const changed = updateRevision !== null && result.revision !== updateRevision;
       updateRevision = result.revision;
-      if (changed && !busy && !selected().size && !state.selectedId) { await refreshAll(); if (polling && version === generation) notice('Inbox updated with provider changes.'); }
-      else if (changed) notice('Inbox changes are available. Refresh when you finish reading or selecting messages.');
+      if (changed) pendingProviderUpdate = true;
+      // A background refresh would abort the active list request and restart its search.
+      // Remember changes until an idle poll can refresh them once.
+      if (!pendingProviderUpdate || state.loading || state.loadingMore || state.refreshing) return;
+      if (!busy && !selected().size && !state.selectedId) {
+        await refreshAll();
+        if (!polling || version !== generation || pollVersion !== pollGeneration) return;
+        pendingProviderUpdate = false;
+        notice('Inbox updated with provider changes.');
+      } else if (changed) notice('Inbox changes are available. Refresh when you finish reading or selecting messages.');
     } catch { /* A transient background outage is surfaced by explicit refresh. */ }
     finally { if (version === generation && pollVersion === pollGeneration) schedule(); }
   }
@@ -734,6 +755,7 @@ export function createMailTools({api, describeError, state, refresh, renderList,
     commitDraft,
     removeCriteria,
     restoreCriteria,
+    pruneLabelCriteria,
     buildFilters(vals) { return buildMailFilters(vals || drafts()); },
     start() { if (!polling) { polling = true; schedule(); } },
     stop,

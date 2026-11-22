@@ -21,7 +21,7 @@ from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHand
 
 CONFIG = Path(os.environ.get("MAILHARBOR_CONFIG", str(Path.home() / ".config/mailharbor/config.json")))
 ORIGIN = ""
-VERSION = "0.8.7"
+VERSION = "0.9.0"
 TIMEOUT = 180
 MAX_RESPONSE = 1024 * 1024
 FOLDERS = {"all", "inbox", "unread", "starred", "sent", "drafts", "archive", "junk", "trash"} | {"tag:" + tag for tag in ("coupons", "development", "social", "jobs", "security", "travel", "work", "newsletters", "finance", "invoices", "tenders", "appointments", "orders")}
@@ -35,7 +35,7 @@ ALLOWED_REQUESTS = {
     ("GET", "/api/accounts"), ("GET", "/"), ("GET", "/app.mjs"), ("GET", "/mail.mjs"),
     ("GET", "/api/mail/folders"), ("POST", "/api/mail/list"), ("POST", "/api/mail/message"),
     ("GET", "/api/drive"), ("GET", "/api/invoices"), ("GET", "/filing.mjs"),
-    *(("GET", path) for path in ("/compose.mjs", "/compose.css", "/mail-content.mjs", "/mail-content.css", "/mail-tools.mjs", "/mail-tools.css", "/telegram-settings.mjs", "/controls.mjs", "/controls.css")),
+    *(("GET", path) for path in ("/compose.mjs", "/compose.css", "/mail-content.mjs", "/mail-content.css", "/mail-tools.mjs", "/mail-tools.css", "/telegram-settings.mjs", "/gemini-settings.mjs", "/controls.mjs", "/controls.css")),
 }
 
 

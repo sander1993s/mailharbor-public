@@ -158,14 +158,15 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
     unchanged([[value.reference.accountId, value.revision]]);
     return value;
   }
-  async function run(current, work, externalSignal) {
+  async function run(current, work, externalSignal, timeoutMs = 180000) {
     if (externalSignal?.aborted) fail('cancelled');
+    if (timeoutMs <= 0) fail('mailbox_timeout');
     if (closed || operations.size >= 4) fail('busy');
     const controller = new AbortController();
     const entry = { controller, accountIds: current.map(value => value.id), promise: null };
     const revisions = versions(current);
     operations.add(entry);
-    const timer = setTimeout(() => controller.abort(new MailHarborError('mailbox_timeout')), 180000);
+    const timer = setTimeout(() => controller.abort(new MailHarborError('mailbox_timeout')), timeoutMs);
     timer.unref?.();
 
     let onExternalAbort = null;
@@ -259,7 +260,7 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
         accounts: accounts.list().map(({ id, email, label, connected }) => ({ id, email, label, connected }))
       };
     },
-    async list(input, { signal } = {}) {
+    list: async function list(input, { signal, retryLabelChange = true, deadline = Date.now() + 180000 } = {}) {
       if (closed) fail('busy');
       object(input, ['folder', 'accountIds', 'query', 'cursor', 'filters', 'sort', 'bodySearch', 'live']);
       const tag = tagForFolder(input.folder);
@@ -328,7 +329,7 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
             if ((observed?.version ?? labelVersion) !== (tags?.version() ?? 0)) fail('stale_message');
             if (version !== deletionVersion) fail('stale_message');
             return { ...result, messages: matched, nextCursor: result.nextCursor ? { kind: 'tag-search', version: tags?.version() ?? 0, reader: result.nextCursor } : null };
-          }, signal);
+          }, signal, deadline - Date.now());
         } else {
           if (input.sort && input.sort !== 'date_desc') entries.sort((a, b) => (input.sort === 'date_asc' ? (Date.parse(a.message.date) || 0) - (Date.parse(b.message.date) || 0) :
             String(a.message[input.sort === 'subject_asc' ? 'subject' : 'author'] ?? '').toLowerCase().localeCompare(String(b.message[input.sort === 'subject_asc' ? 'subject' : 'author'] ?? '').toLowerCase())) || a.message.id.localeCompare(b.message.id));
@@ -339,37 +340,52 @@ export function createMailApi({ accounts, reader, tags, processing, conversation
         }
       } else {
         const currentLabelScope = () => {
-          const entries = tags?.entries(current) ?? [];
+          // When there is an inclusion, exclusions are already applied while
+          // building its fingerprint set. Unrelated excluded mail must neither
+          // enlarge this query nor invalidate a search during classification.
+          const entries = tags?.entries(current, { anyTags: includeLabels.length ? includeLabels : excludeLabels }) ?? [];
           return {
             ...(includeLabels.length ? { scopedReferences: entries.filter(matchesLabels).map(entry => entry.reference) } : {}),
-            ...(excludeLabels.length ? { excludedReferences: entries.filter(entry => excludeLabels.some(id => entry.message.tags.includes(id))).map(entry => entry.reference) } : {})
+            ...(!includeLabels.length && excludeLabels.length ? { excludedReferences: entries.map(entry => entry.reference) } : {})
           };
         };
         let checkedLabelVersion = tags?.version() ?? 0;
+        let labelScopeChanged = false;
         const labelScope = labelFiltering ? currentLabelScope() : {};
         const labelIdentity = labelFiltering ? labelScopeIdentity(labelScope) : null;
         if (labelFiltering && state && (state.kind !== 'label-search' || state.scope !== labelIdentity)) fail('stale_message');
         verifyLabelScope = () => {
           if (!labelFiltering || checkedLabelVersion === (tags?.version() ?? 0)) return;
           // Read/star flags and refreshed metadata change the store version, but not label membership.
-          if (labelScopeIdentity(currentLabelScope()) !== labelIdentity) fail('stale_message');
+          if (labelScopeIdentity(currentLabelScope()) !== labelIdentity) { labelScopeChanged = true; fail('stale_message'); }
           checkedLabelVersion = tags?.version() ?? 0;
         };
-        data = await run(current, async opSignal => {
-          const result = labelScope.scopedReferences?.length === 0 ? { messages: [], total: 0, totalComplete: true, errors: [], nextCursor: null } :
-            await reader.list(current, { folder: input.folder, query, cursor: labelFiltering ? state?.reader ?? null : state, limit: 50, signal: opSignal,
-              filters: providerFilters, sort: input.sort ?? 'date_desc', bodySearch: input.bodySearch ?? false, live, includeAttachments: true, ...labelScope });
-          if (opSignal.aborted) throw opSignal.reason;
-          verifyLabelScope();
-          await tags?.observe(current, result.messages, { verify: () => {
+        try {
+          data = await run(current, async opSignal => {
+            const result = labelScope.scopedReferences?.length === 0 ? { messages: [], total: 0, totalComplete: true, errors: [], nextCursor: null } :
+              await reader.list(current, { folder: input.folder, query, cursor: labelFiltering ? state?.reader ?? null : state, limit: 50, signal: opSignal,
+                filters: providerFilters, sort: input.sort ?? 'date_desc', bodySearch: input.bodySearch ?? false, live, includeAttachments: true, ...labelScope });
             if (opSignal.aborted) throw opSignal.reason;
-            if (version !== deletionVersion) fail('stale_message');
             verifyLabelScope();
-            unchanged(versions(current));
-          } });
+            await tags?.observe(current, result.messages, { verify: () => {
+              if (opSignal.aborted) throw opSignal.reason;
+              if (version !== deletionVersion) fail('stale_message');
+              verifyLabelScope();
+              unchanged(versions(current));
+            } });
+            verifyLabelScope();
+            return labelFiltering ? { ...result, nextCursor: result.nextCursor ? { kind: 'label-search', scope: labelIdentity, reader: result.nextCursor } : null } : result;
+          }, signal, deadline - Date.now());
           verifyLabelScope();
-          return labelFiltering ? { ...result, nextCursor: result.nextCursor ? { kind: 'label-search', scope: labelIdentity, reader: result.nextCursor } : null } : result;
-        }, signal);
+        } catch (error) {
+          // Background classification can add a matching label during the first
+          // search. Retry once with its fresh scope; never loop under churn or
+          // silently reuse a cursor whose membership has changed.
+          if (!state && retryLabelChange && labelScopeChanged && error.code === 'stale_message') {
+            return list(input, { signal, retryLabelChange: false, deadline });
+          }
+          throw error;
+        }
       }
       if (version !== deletionVersion) fail('stale_message');
       verifyLabelScope();

@@ -602,11 +602,30 @@ export function createRichMailView({api, describeError}) {
 
         // Privacy banner only when content.html contains blocked remote images
         const hasBlockedImages = /data-blocked-image="true"/u.test(content.html);
-        if (hasBlockedImages) {
-          if (!currentPrivacy) {
-            currentPrivacy = make('p', 'Remote images and external resources are blocked for your privacy.', 'rich-mail-privacy');
-            (currentInlineStatus || currentError || currentIncomplete || currentStatus || currentToolbar).after(currentPrivacy);
+        const canLoadEmbedded = Boolean(
+          content &&
+          !content.encrypted &&
+          Array.isArray(content.inlineParts) &&
+          content.inlineParts.some(part => part?.mimeType && RASTER.has(String(part.mimeType).toLowerCase())) &&
+          (!content.inlineImagesLoaded || content.inlineImagesStatus !== 'complete')
+        );
+        if (hasBlockedImages || canLoadEmbedded) {
+          const nextPrivacy = make('div', undefined, 'rich-mail-privacy');
+          nextPrivacy.append(make('span', hasBlockedImages
+            ? 'Remote images and external resources are blocked for your privacy.'
+            : 'Embedded images are paused until you choose to show them.'));
+          if (canLoadEmbedded) {
+            const inlineBtn = button(content.inlineImagesLoaded ? 'Retry embedded images' : 'Show embedded images', () => void loadInlineImages());
+            inlineBtn.className = 'subtle rich-mail-privacy-action';
+            inlineBtn.disabled = inlineImagesPending || actionPending;
+            nextPrivacy.append(inlineBtn);
           }
+          if (currentPrivacy) {
+            currentPrivacy.replaceWith(nextPrivacy);
+          } else {
+            (currentInlineStatus || currentError || currentIncomplete || currentStatus || currentToolbar).after(nextPrivacy);
+          }
+          currentPrivacy = nextPrivacy;
         } else if (currentPrivacy) {
           currentPrivacy.remove();
           currentPrivacy = null;

@@ -425,7 +425,7 @@ function referenceCheck(account, reference) {
 
 /** On-demand header index. Cursors remain private to the authenticated server. */
 export function createMailReader({ connectionOptions, createClient, now = () => Date.now(), sessionTimeoutMs } = {}) {
-  const { session, active } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
+  const { session, active, close: closeSession } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
   const gmailArchiveReader = createMailProcessingReader({ connectionOptions, createClient, sessionTimeoutMs });
 
   async function locked(client, path, readOnly, operation) {
@@ -530,6 +530,10 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
     };
     const scoped = referenceScope(scopedReferences), excluded = referenceScope(excludedReferences);
     const filteredReferences = scoped !== undefined || excluded !== undefined;
+    const includedByAccount = scoped && new Map(accounts.map(account => [account.id, new Set()]));
+    if (scoped) for (const value of scoped) {
+      if (!excluded?.has(value)) includedByAccount.get(value.slice(0, value.indexOf(':'))).add(value);
+    }
     if ((folder === 'unread' && filters.unread === false) || (folder === 'starred' && filters.starred === false)) fail('invalid_request');
     query = query.trim();
     const scope = hash({ folder, query, filters: Object.entries(filters).sort(), sort, bodySearch, scoped: scoped ? [...scoped].sort() : null,
@@ -537,10 +541,13 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
       accounts: accounts.map(account => [account.id, account.email, account.updatedAt, account.archivePath]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))) });
     if (cursor && (cursor.version !== 1 || cursor.scope !== scope || !Array.isArray(cursor.accounts) || !cursor.after)) fail('stale_message');
     const candidates = [], snapshots = [], errors = [], states = [];
-    let total = 0;
+    let total = 0, totalsKnown = true;
     const midnight = Math.floor(now() / DAY) * DAY;
+    // Included labels deduplicate logical messages. Their rank must survive a
+    // refreshed saved UID or another physical copy being discovered next time.
     const ordering = (a, b) => (sort === 'date_asc' ? a.time - b.time : sort === 'subject_asc' || sort === 'sender_asc' ?
-      a.sortKey.localeCompare(b.sortKey) : 0) || compare(a, b);
+      a.sortKey.localeCompare(b.sortKey) : 0) || (scoped ? b.time - a.time || a.accountId.localeCompare(b.accountId) ||
+        a.fingerprint.localeCompare(b.fingerprint) : compare(a, b));
     const offer = (into, entry) => {
       if (cursor && ordering(entry, cursor.after) <= 0) return;
       into.push(entry); into.sort(ordering);
@@ -551,6 +558,11 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
       const previous = cursor?.accounts.find(item => item.accountId === account.id);
       if (cursor && !previous) {
         errors.push(cursor.errors?.find(item => item.accountId === account.id) ?? { accountId: account.id, code: 'mailbox_error' });
+        return;
+      }
+      const included = includedByAccount?.get(account.id);
+      if (included?.size === 0) {
+        snapshots.push({ accountId: account.id, folders: [] });
         return;
       }
       try {
@@ -576,7 +588,7 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
           if (scoped) selected.sort((a, b) => a.path.localeCompare(b.path));
           const accountCandidates = [], accountFolders = [];
           const scopedSeen = new Set();
-          let accountTotal = 0;
+          let accountTotal = 0, accountTotalsKnown = true;
           for (const target of selected) {
             abortCheck(signal);
             await locked(client, target.path, true, async uidValidity => {
@@ -622,14 +634,26 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
                     if (scoped) scopedSeen.add(value.reference.fingerprint);
                     if (includeAttachments) value.invoiceDocuments = invoiceParts(message.bodyStructure).map(({ filename, mimeType }) => ({ filename, mimeType }));
                     offer(folderCandidates, { time: timestamp(message), sortKey: sort === 'subject_asc' ? value.subject.toLowerCase() :
-                      sort === 'sender_asc' ? value.author.toLowerCase() : '', accountId: account.id, path: target.path, uid: message.uid, value });
+                      sort === 'sender_asc' ? value.author.toLowerCase() : '', accountId: account.id, path: target.path, uid: message.uid,
+                      ...(scoped ? { fingerprint: value.reference.fingerprint } : {}), value });
                   }
                   for (const uid of chunk) fetched.add(uid);
                   if (validity(client, target.path) !== uidValidity) fail('stale_message');
                 }
               }
-              let complete = false;
-              if (initial.size > HEADER_CHUNK && sort === 'date_desc' && filters.hasAttachment == null && !filteredReferences) {
+              let complete = included !== undefined && scopedSeen.size === included.size;
+              if (!complete && included?.size <= HEADER_CHUNK && selected.length === 1) {
+                // Old, sparse labels need only their saved UIDs when every
+                // fingerprint is still present. Missing/moved references retain
+                // the ordinary provider search fallback below.
+                const known = [...new Set(scopedReferences.filter(reference => reference.accountId === account.id &&
+                  pathEqual(reference.path, target.path) && reference.uidValidity === uidValidity &&
+                  included.has(`${account.id}:${reference.fingerprint}`) && initial.has(reference.uid)).map(reference => reference.uid))].sort((a, b) => a - b);
+                await headers(known);
+                complete = scopedSeen.size === included.size;
+              }
+              if (!complete && initial.size > HEADER_CHUNK && sort === 'date_desc' &&
+                (filters.hasAttachment == null || filteredReferences)) {
                 for (const days of WINDOWS) {
                   abortCheck(signal);
                   const cutoff = midnight - days * DAY, date = new Date(cutoff);
@@ -638,21 +662,29 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
                   if (!Array.isArray(recent)) break;
                   if (recent.some(uid => !validUid(uid))) fail('mailbox_error');
                   await headers([...new Set(recent)].filter(uid => initial.has(uid) && !fetched.has(uid)));
+                  // This is one unified page. A mailbox with only a few recent
+                  // matches need not find 51 of its own once another account has
+                  // supplied enough newer matches to prove the page boundary.
+                  const pageCandidates = filteredReferences ? [...candidates, ...accountCandidates, ...folderCandidates].sort(ordering) : folderCandidates;
                   // Both Date and INTERNALDATE outside the window are older than this
                   // strict bound, including numeric Date time zones spanning days.
-                  if (fetched.size === initial.size || (folderCandidates.length > limit && folderCandidates[limit].time > cutoff + DATE_MARGIN)) {
+                  if (fetched.size === initial.size || (pageCandidates.length > limit && pageCandidates[limit].time > cutoff + DATE_MARGIN)) {
                     complete = true; break;
                   }
                 }
               }
               if (!complete) await headers([...initial].filter(uid => !fetched.has(uid)).sort((a, b) => a - b));
+              // The date bound proves this page's order, not a filtered whole-
+              // mailbox count. Do not fetch years of headers just to count them.
+              if (filteredReferences && fetched.size < initial.size && (!included || scopedSeen.size !== included.size)) accountTotalsKnown = false;
               if (validity(client, target.path) !== uidValidity) fail('stale_message');
               for (const entry of folderCandidates) offer(accountCandidates, entry);
             });
           }
-          return { candidates: accountCandidates, total: accountTotal, snapshot: { accountId: account.id, folders: accountFolders } };
+          return { candidates: accountCandidates, total: accountTotal, totalsKnown: accountTotalsKnown, snapshot: { accountId: account.id, folders: accountFolders } };
         });
         total += result.total;
+        totalsKnown &&= result.totalsKnown;
         snapshots.push(result.snapshot);
         for (const entry of result.candidates) offer(candidates, entry);
       } catch (error) {
@@ -665,9 +697,10 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
       states.sort((a, b) => a.accountId.localeCompare(b.accountId) || a.folderId.localeCompare(b.folderId));
     }
     const selected = candidates.slice(0, limit), last = selected.at(-1);
-    return { messages: selected.map(item => item.value), errors, total, totalComplete: errors.length === 0,
+    return { messages: selected.map(item => item.value), errors, total: totalsKnown ? total : null, totalComplete: totalsKnown && errors.length === 0,
       nextCursor: candidates.length > limit ? { version: 1, scope, accounts: snapshots, errors,
-        after: { time: last.time, sortKey: last.sortKey, accountId: last.accountId, path: last.path, uid: last.uid } } : null,
+        after: { time: last.time, sortKey: last.sortKey, accountId: last.accountId, path: last.path, uid: last.uid,
+          ...(scoped ? { fingerprint: last.fingerprint } : {}) } } : null,
       ...(includeStatus ? { states } : {}) };
   }
 
@@ -1376,5 +1409,10 @@ export function createMailReader({ connectionOptions, createClient, now = () => 
     return { signature: hash(states), states, errors };
   }
 
-  return { folders, list, read, content, contentBatch, attachment, source, apply, emptyTrash, manageFolder, providerLabels, setProviderLabel, changes };
+  function close() {
+    closeSession();
+    gmailArchiveReader.close?.();
+  }
+
+  return { folders, list, read, content, contentBatch, attachment, source, apply, emptyTrash, manageFolder, providerLabels, setProviderLabel, changes, close };
 }

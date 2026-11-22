@@ -2,6 +2,8 @@
 
 Conflicting cached fingerprints can reference the same physical mailbox location. The organizer keeps those references in separate bounded flag, body-read, and move batches, preserving input order and validating each fingerprint independently. Every record retains its own result and move journal; a stale reference cannot authorize an action on a different message.
 
+Version 0.8.8 adds an analysis-state index for faster status counts, uses provider execution time rather than shared-queue wait to grow classification batches, and exposes body-read retry deadlines. Explicit Resume can retry an AI authentication failure while preserving quota and configuration blocks. Discovery can recover stale body reads when the same immutable fingerprint is verified at a new location; owner decisions, move intents and classifier retry budgets remain protected. Existing successful classifications and mail identity checks are unchanged.
+
 Version 0.7.1 uses classifier version 3 with prompt/schema version 2. The provider transport accepts an exact whole-response bare or JSON code fence and correctly typed empty optional tool metadata. It still rejects extra prose, nonempty/malformed tool metadata, tool/permission events and invalid response schemas. Failed results receive a bounded retry budget for the new classifier; successful cached classifications are preserved.
 
 MailHarbor's optional organizer discovers mail across connected accounts, marks messages read, saves one classification per logical message, applies shared labels, and checks when an archive or Trash action becomes due. It runs on the homeserver after the browser closes. It uses the separately configured Gemini worker; ordinary browsing and local invoice extraction do not require a model call.

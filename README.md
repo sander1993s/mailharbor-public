@@ -22,6 +22,8 @@ Mailbox changes affect the original provider. Archive retains mail; permanent de
 
 Open **Filters → Labels** to include or exclude shared labels in the current folder and account selection. For example, include **Work & Administration** to show work emails. Multiple included labels match any of those labels; an excluded label always hides a matching message. Expand **Advanced search** for sender, date, attachment, and other criteria, or to search all folders. Advanced search starts collapsed.
 
+Applied label selections are remembered in this browser across reloads. **Clear all** removes the saved selections. The compact **Labels** summary expands to show and remove individual selections. Search text and advanced criteria are not saved with these preferences. Background inbox updates wait for an active search to finish; large filtered views may show a loaded-message count until the full total is known.
+
 ## Add email accounts
 
 Open **Settings → Accounts**, add an account, choose a provider, enter your own email address and label, and connect it. Multiple accounts from the same provider are supported. A custom IMAP/SMTP connection covers compatible providers without a built-in preset.

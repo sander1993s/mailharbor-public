@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createMailView as buildMailView } from '../web/mail.mjs';
 import { createMailAttachmentsView } from '../web/mail-attachments.mjs';
+import { LABEL_FILTERS_STORAGE_KEY } from '../web/mail-filter-preferences.mjs';
 
 function splitSelectorCommas(selector) {
   const parts = [];
@@ -1274,6 +1275,113 @@ test('label filters submit Work includes and exclusions, show named removable ch
   assert.equal(calls.at(-1).filters,undefined);
   assert.equal(panel().querySelector('[data-mail-label-filter="coupons"]').value,'');
   assert.equal(get('mail-list').querySelectorAll('[data-message-id]').length,3);
+});
+
+test('saved label filters survive a new view, reopen selected, and Clear all stays cleared', async t => {
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const saved = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {configurable:true, value:{getItem:key => saved.get(key) ?? null, setItem:(key,value) => saved.set(key,value)}});
+  t.after(() => previousStorage ? Object.defineProperty(globalThis, 'localStorage', previousStorage) : delete globalThis.localStorage);
+  const {get} = dom(t), calls = [];
+  const api = async (path, options) => {
+    if (path === '/api/mail/folders') return {accounts:[{id:'a',connected:true}],folders:[{id:'inbox',accountIds:['a']}]};
+    if (path === '/api/mail/list') { calls.push(options.body); return {messages:[],total:0,totalComplete:true}; }
+    return {};
+  };
+  const first = createMailView({api}); first.show(); await nextTurn();
+  const panel = () => get('mail-tools').querySelector('#mail-advanced-search');
+  const choose = (id,value) => { const node = panel().querySelector(`[data-mail-label-filter="${id}"]`); node.value = value; node.dispatch('change'); };
+  get('mail-advanced').dispatch('click');
+  for (const id of ['invoices','orders','security','work']) choose(id,'include');
+  for (const id of ['coupons','development','jobs','newsletters']) choose(id,'exclude');
+  panel().querySelector('form').dispatch('submit'); await nextTurn();
+  const expected = {includeLabels:['invoices','orders','security','work'],excludeLabels:['coupons','development','jobs','newsletters']};
+  assert.deepEqual(JSON.parse(saved.get(LABEL_FILTERS_STORAGE_KEY)),expected);
+  const disclosure = get('mail-search-summary').querySelector('.mail-label-summary');
+  assert.equal(disclosure.open,false);
+  assert.equal(disclosure.querySelector('summary').textContent,'Labels · 4 included · 4 excluded');
+  assert.equal(disclosure.querySelectorAll('.mail-chip-remove').length,8);
+  first.reset();
+  const second = createMailView({api}); second.show(); await nextTurn();
+  assert.deepEqual(calls.at(-1).filters,expected);
+  get('mail-advanced').dispatch('click');
+  assert.equal(panel().querySelector('[data-mail-label-filter="work"]').value,'include');
+  assert.equal(panel().querySelector('[data-mail-label-filter="coupons"]').value,'exclude');
+  get('mail-search-summary').querySelector('.mail-clear-all-chip').dispatch('click'); await nextTurn();
+  second.reset();
+  const third = createMailView({api}); third.show(); await nextTurn();
+  assert.equal(calls.at(-1).filters,undefined);
+});
+
+test('saved deleted custom labels are removed before the first search', async t => {
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  let saved = JSON.stringify({includeLabels:['work',`custom_${'a'.repeat(32)}`]});
+  Object.defineProperty(globalThis, 'localStorage', {configurable:true, value:{getItem:() => saved, setItem:(_key,value) => { saved = value; }}});
+  t.after(() => previousStorage ? Object.defineProperty(globalThis, 'localStorage', previousStorage) : delete globalThis.localStorage);
+  const {get} = dom(t), calls = [];
+  const view = createMailView({api:async (path, options) => {
+    if (path === '/api/mail/folders') { await nextTurn(); return {accounts:[{id:'a',connected:true}],folders:[{id:'inbox',accountIds:['a']}]}; }
+    if (path === '/api/mail/list') { calls.push(options.body); return {messages:[]}; }
+    return {};
+  }});
+  view.show(); await nextTurn(); await nextTurn();
+  assert.equal(calls.length,1);
+  assert.deepEqual(calls[0].filters,{includeLabels:['work']});
+  assert.deepEqual(JSON.parse(saved),{includeLabels:['work']});
+  assert.equal(get('mail-tools').querySelector('[data-mail-label-filter="work"]').value,'include');
+});
+
+test('refresh removes a custom label deleted after the view was initialized', async t => {
+  const {get} = dom(t), calls = [];
+  const custom = `custom_${'b'.repeat(32)}`;
+  let exists = true;
+  const view = createMailView({api:async (path, options) => {
+    if (path === '/api/mail/folders') {
+      await nextTurn();
+      return {accounts:[{id:'a',connected:true}],folders:[{id:'inbox',accountIds:['a']},...(exists ? [{id:`tag:${custom}`,label:'Client'}] : [])]};
+    }
+    if (path === '/api/mail/list') { calls.push(options.body); return {messages:[]}; }
+    return {};
+  }});
+  view.show(); await nextTurn(); await nextTurn();
+  get('mail-advanced').dispatch('click');
+  const panel = get('mail-tools').querySelector('#mail-advanced-search');
+  const select = panel.querySelector(`[data-mail-label-filter="${custom}"]`); select.value = 'include'; select.dispatch('change');
+  panel.querySelector('form').dispatch('submit'); await nextTurn();
+  assert.deepEqual(calls.at(-1).filters,{includeLabels:[custom]});
+  exists = false;
+  const before = calls.length;
+  get('mail-refresh').dispatch('click'); await nextTurn(); await nextTurn();
+  assert.equal(calls.length,before + 1);
+  assert.equal(calls.at(-1).filters,undefined);
+  assert.equal(get('mail-search-summary').querySelector('.mail-label-summary'),null);
+});
+
+test('a failed label search stops the loading status and can retry with the same filters', async t => {
+  const {get} = dom(t), calls = [];
+  let rejectSearch;
+  const view = createMailView({api:async (path, options) => {
+    if (path === '/api/mail/folders') return {accounts:[{id:'a',connected:true}],folders:[{id:'inbox',accountIds:['a']}]};
+    if (path === '/api/mail/list') {
+      calls.push(options.body);
+      if (calls.length === 2) return new Promise((_resolve,reject) => { rejectSearch = reject; });
+      return {messages:[{id:'m',accountId:'a',subject:'Project',tags:['work']}],total:1,totalComplete:true};
+    }
+    return {};
+  }});
+  view.show(); await nextTurn(); get('mail-advanced').dispatch('click');
+  const panel = get('mail-tools').querySelector('#mail-advanced-search');
+  const select = panel.querySelector('[data-mail-label-filter="work"]'); select.value = 'include'; select.dispatch('change');
+  panel.querySelector('form').dispatch('submit'); await nextTurn();
+  assert.match(get('mail-list-count').textContent,/Loading/);
+  rejectSearch(Object.assign(new Error('Timed out'),{code:'mailbox_timeout'})); await nextTurn();
+  assert.equal(get('mail-list-count').textContent,'Previous results');
+  assert.equal(get('mail-list').attributes.get('aria-busy'),'false');
+  assert.equal(get('mail-list').querySelectorAll('button').some(node => node.textContent === 'Cancel search'),false);
+  assert.equal(get('mail-list').querySelectorAll('[data-message-id]').length,1);
+  get('mail-list').querySelector('.mail-error-bar').querySelector('button').dispatch('click'); await nextTurn();
+  assert.deepEqual(calls.at(-1).filters,{includeLabels:['work']});
+  assert.equal(get('mail-list').querySelector('.mail-previous-results-bar'),null);
 });
 
 test('cancel and retry preserve label arrays, and history restores prior label controls', async t => {

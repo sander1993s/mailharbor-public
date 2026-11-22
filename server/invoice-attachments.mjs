@@ -33,8 +33,9 @@ export function invoiceParts(structure) {
 
 /** Bounded original PDF/XML downloads. Read-only selection and PEEK preserve mail flags. */
 export function createInvoiceAttachments({ connectionOptions, createClient, sessionTimeoutMs } = {}) {
-  const { session, active } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
+  const { session, active, close } = createMailboxSession({ connectionOptions, createClient, sessionTimeoutMs });
   return {
+    close,
     async read(account, reference, { signal } = {}) {
       if (!reference || reference.accountId !== account.id || !validUid(reference.uid) ||
         typeof reference.path !== 'string' || !reference.path || reference.path.length > 1024 || /[\u0000-\u001f\u007f]/u.test(reference.path) ||

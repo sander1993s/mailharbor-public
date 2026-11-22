@@ -19,10 +19,19 @@ export const SAFE_SHARED = { userSettings: {
 } };
 
 function fail(message) { throw Object.assign(new Error(message), { code: 'configuration_error' }); }
-async function sha256(filename) {
+const cachedHashes = new Map();
+async function sha256(filename, stat) {
+  const cacheable = stat && stat.size >= 1024 * 1024;
+  const cacheKey = cacheable ? `${filename}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` : null;
+  if (cacheKey && cachedHashes.has(cacheKey)) return cachedHashes.get(cacheKey);
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(filename)) hash.update(chunk);
-  return hash.digest('hex');
+  const digest = hash.digest('hex');
+  if (cacheKey) {
+    if (cachedHashes.size >= 16) cachedHashes.delete(cachedHashes.keys().next().value);
+    cachedHashes.set(cacheKey, digest);
+  }
+  return digest;
 }
 
 async function ordinary(filename) {
@@ -88,8 +97,8 @@ export async function validateProfile(config) {
     const mcp = await json(path.join(profileHome, '.gemini', 'config', 'mcp_config.json'));
     if (Object.keys(mcp).length !== 0) fail('MailHarbor does not permit Agy MCP connections.');
     for (const dir of [profileHome, path.join(profileHome, '.gemini'), cliRoot, path.join(profileHome, '.gemini', 'config')]) await rejectCustomization(dir);
-    await ordinary(config.agyPath);
-    const binaryHash = await sha256(config.agyPath);
+    const agyStat = await ordinary(config.agyPath);
+    const binaryHash = await sha256(config.agyPath, agyStat);
     if (binaryHash !== marker.agySha256) fail('Agy changed since profile initialization. Review the upgrade and refresh its pin.');
     await mkdir(config.workRoot, { recursive: true, mode: 0o700 });
     const cwdRoot = await realpath(config.workRoot);

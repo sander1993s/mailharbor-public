@@ -8,6 +8,24 @@ import { createAccountStore } from '../server/account-store.mjs';
 import { createMailIndex } from '../server/mail-index.mjs';
 import { createMailTags } from '../server/mail-tags.mjs';
 
+test('multi-label lookup decrypts only selected owners and labels without duplicating overlaps', async t => {
+  const index = await createMailIndex(); t.after(() => index.close());
+  const account = { id: 'a', email: 'a@example.test' }, other = { id: 'b', email: 'b@example.test' };
+  const data = { accounts: [account, other] }, store = { read: () => structuredClone(data) };
+  for (const [key, owner, labels, date] of [['one', account, ['work', 'finance'], '2026-10-02'], ['two', account, ['finance'], '2026-10-01'],
+    ['other-label', account, ['newsletters'], '2026-10-03'], ['other-owner', other, ['work'], '2026-10-04']]) {
+    index.putTag(key, { accountId: owner.id, email: owner.email, tags: labels, message: { accountId: owner.id, date, subject: key }, reference: { accountId: owner.id } });
+  }
+  assert.deepEqual(index.tagEntries(['a:a@example.test'], ['work', 'finance']).map(entry => entry.key), ['one', 'two']);
+  assert.deepEqual(index.tagEntries(['a:a@example.test'], []).map(entry => entry.key), []);
+  assert.deepEqual(index.tagEntries(['a:a@example.test'], 'work').map(entry => entry.key), ['one']);
+  const tags = createMailTags({ store, index });
+  assert.deepEqual(tags.entries([account], { anyTags: ['work', 'finance'] }).map(entry => entry.message.subject), ['one', 'two']);
+  assert.deepEqual(tags.entries([account], { anyTags: [] }), []);
+  assert.throws(() => tags.entries([account], { anyTags: ['missing'] }), { code: 'invalid_request' });
+  assert.deepEqual(tags.entries([{ ...account, email: 'replaced@example.test' }], { anyTags: ['work'] }), []);
+});
+
 test('encrypted index persists atomically, never exposes headers, and isolates records by AAD', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'mailharbor-index-'));
   let index; t.after(async () => { index?.close(); await rm(dir, { recursive: true, force: true }); });
@@ -25,6 +43,39 @@ test('encrypted index persists atomically, never exposes headers, and isolates r
   assert.equal(index.list('messages', { state: 'ready', before: 100 })[0].value.subject, 'PRIVATE_INDEX_SUBJECT');
   const detached = index.get('messages', 'a'); detached.subject = 'changed';
   assert.equal(index.get('messages', 'a').subject, 'PRIVATE_INDEX_SUBJECT');
+});
+
+test('processing summary preserves coverage, blocker counts and due dates across transitions and restart', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mailharbor-index-summary-'));
+  let index; t.after(async () => { index?.close(); await rm(dir, { recursive: true, force: true }); });
+  await createAccountStore(dir); index = await createMailIndex(dir);
+  assert.deepEqual(index.processingSummary(), { analysis: {}, categories: {}, reasons: {}, earliestDue: null });
+  index.transaction(() => {
+    index.put('messages', 'a', { subject: 'PRIVATE_SUMMARY_SUBJECT' }, { state: 'pending', due: 200, analysis: 'pending' });
+    index.put('messages', 'b', {}, { state: 'pending', due: 300, analysis: 'retrying', category: 'retry', reasons: ['body_read_failed'] });
+    index.put('messages', 'c', {}, { state: 'review', due: null, analysis: 'classified', category: 'held', reasons: ['incomplete_message', 'date_uncertain'] });
+    index.put('messages', 'd', {}, { state: 'ready', due: 100, analysis: 'classified' });
+    index.put('messages', 'e', {}, { state: 'done', due: 1, analysis: 'classified' });
+    index.put('messages', 'f', {}, { state: 'disconnected', due: 2, analysis: 'disconnected', category: 'failed', reasons: ['account_disconnected'] });
+    index.put('folders', 'folder', {}, { state: 'pending', due: 0 });
+  });
+  const expected = { analysis: { pending: 1, retrying: 1, classified: 3, disconnected: 1 },
+    categories: { '': 3, retry: 1, held: 1, failed: 1 },
+    reasons: { body_read_failed: 1, incomplete_message: 1, date_uncertain: 1, account_disconnected: 1 }, earliestDue: 100 };
+  assert.deepEqual(index.processingSummary(), expected);
+  assert.throws(() => index.transaction(() => {
+    index.put('messages', 'b', {}, { state: 'done', analysis: 'classified' });
+    throw new Error('rollback summary');
+  }), /rollback summary/);
+  assert.deepEqual(index.processingSummary(), expected);
+  index.close(); index = await createMailIndex(dir);
+  assert.deepEqual(index.processingSummary(), expected);
+  index.put('messages', 'b', {}, { state: 'review', due: 50, analysis: 'classified', category: 'review', reasons: ['classification_uncertain'] });
+  assert.deepEqual(index.processingSummary(), {
+    analysis: { pending: 1, classified: 4, disconnected: 1 }, categories: { '': 3, review: 1, held: 1, failed: 1 },
+    reasons: { classification_uncertain: 1, incomplete_message: 1, date_uncertain: 1, account_disconnected: 1 }, earliestDue: 50
+  });
+  assert.equal(index.get('messages', 'a').subject, 'PRIVATE_SUMMARY_SUBJECT');
 });
 
 test('durable labels migrate old labels, preserve manual overrides, and exceed the old ten-thousand cap', async t => {

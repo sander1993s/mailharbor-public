@@ -151,7 +151,7 @@ test('ordinary twelve-message wire responses avoid repeated empty dates and long
 
 test('shared schema publishes the exact limits and syntax in the classifier prompt', () => {
   const prompt = classificationPrompt({ messages: [message()] });
-  assert.equal(CLASSIFIER_VERSION, 3); assert.equal(PROMPT_VERSION, 2); assert.equal(SCHEMA_VERSION, MAIL_CLASSIFICATION_SCHEMA.version);
+  assert.equal(CLASSIFIER_VERSION, 3); assert.equal(PROMPT_VERSION, 3); assert.equal(SCHEMA_VERSION, MAIL_CLASSIFICATION_SCHEMA.version);
   assert.ok(prompt.includes(MAIL_CLASSIFICATION_SCHEMA.dateSyntax));
   for (const limit of ['titleLimit', 'locationLimit']) assert.ok(prompt.includes(String(MAIL_CLASSIFICATION_SCHEMA[limit])));
   for (const name of MAIL_CLASSIFICATION_SCHEMA.requiredWireFields) assert.ok(prompt.includes(name));

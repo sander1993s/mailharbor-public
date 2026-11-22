@@ -1,5 +1,5 @@
 export const MODEL = 'gemini-3.8-flash-high';
-export const VERSION = '0.8.7';
+export const VERSION = '0.9.0';
 export const MAX_REQUEST_BYTES = 512 * 1024;
 
 // Only these fixed values may cross the API/persistence boundary. Provider text,
@@ -22,7 +22,8 @@ export const ERROR_DIAGNOSTICS = Object.freeze({
   response_text_invalid: 'response_schema', cli_timeout: 'timeout',
   cli_start_failed: 'configuration', profile_invalid: 'configuration',
   cli_pipe_failed: 'transport', cli_stderr_limit: 'transport', provider_failure: 'transport',
-  provider_quota: 'provider_limits', provider_rate_limit: 'provider_limits', provider_auth: 'authentication'
+  provider_quota: 'provider_limits', provider_rate_limit: 'provider_limits',
+  provider_budget_reached: 'provider_limits', provider_auth: 'authentication'
 });
 
 export class MailHarborError extends Error {
