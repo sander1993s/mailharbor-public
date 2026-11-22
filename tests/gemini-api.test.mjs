@@ -51,8 +51,8 @@ test('gemini-api configures encrypted state, redacts keys, disables thinking ove
   });
 
   assert.equal(gemini.isActive(), false);
-  assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.1-flash-lite');
-  assert.equal(gemini.status().model, 'gemini-3.1-flash-lite');
+  assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.5-flash-lite');
+  assert.equal(gemini.status().model, 'gemini-3.5-flash-lite');
   assert.equal(gemini.status().maxSpendUsd, 12);
 
   const configured = await gemini.configure({
@@ -186,7 +186,7 @@ test('jobs manager routes classification & briefings to Direct Gemini API with 3
     const initialStatus = await jobs.status();
     assert.equal(initialStatus.ready, true);
     assert.equal(initialStatus.provider, 'gemini-api');
-    assert.equal(initialStatus.model, 'gemini-3.1-flash-lite');
+    assert.equal(initialStatus.model, 'gemini-3.5-flash-lite');
 
     const payload = {
       messages: [{

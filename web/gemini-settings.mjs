@@ -33,7 +33,7 @@ export function createGeminiSettingsView({ root, api, describeError, onChanged }
   heading.id = 'gemini-settings-title';
 
   const intro = make('p',
-    'Process up to 35 emails per batch over HTTPS using Gemini 3.1 Flash-Lite without CLI startup overhead (~$10 total for 56,000 emails). MailHarbor enforces a strict pre-flight USD spend cap and pauses automatically before exceeding your budget.',
+    'Process up to 35 emails per batch over HTTPS using Gemini 3.5 Flash-Lite without CLI startup overhead (~$9.80 total for your remaining backlog). MailHarbor enforces a strict pre-flight USD spend cap and pauses automatically before exceeding your budget.',
     'fineprint'
   );
 
@@ -148,9 +148,11 @@ export function createGeminiSettingsView({ root, api, describeError, onChanged }
 
   function populateModels(models, selected) {
     const list = Array.isArray(models) && models.length ? models : [
-      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite ($0.25 / $1.50 per 1M · Latest · ~$10 for 56k mails)' },
-      { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite ($0.10 / $0.40 per 1M · ~$5 for 56k mails)' },
-      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash ($0.30 / $2.50 per 1M · Richer briefings)' }
+      { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite ($0.30 / $2.50 per 1M · Newest Flash-Lite · ~$9.80 for remaining backlog)' },
+      { id: 'gemini-flash-lite-latest', label: 'Gemini Flash-Lite Latest (Auto-tracks newest Google Flash-Lite)' },
+      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite ($0.25 / $1.50 per 1M · ~$8 for remaining backlog)' },
+      { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite ($0.10 / $0.40 per 1M · ~$4 for remaining backlog)' },
+      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash ($0.30 / $2.50 per 1M)' }
     ];
     modelSelect.replaceChildren();
     for (const item of list) {
@@ -348,7 +350,7 @@ export function createGeminiSettingsView({ root, api, describeError, onChanged }
   });
 
   document.addEventListener('visibilitychange', reconcile);
-  populateModels(null, 'gemini-3.1-flash-lite');
+  populateModels(null, 'gemini-3.5-flash-lite');
   update();
 
   return {

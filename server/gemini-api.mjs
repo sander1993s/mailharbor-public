@@ -4,7 +4,7 @@ import { createMailClassifier, validateWireRequest, classificationPrompt, normal
 import { validateNotificationSummaryRequest, notificationSummaryPrompt, notificationSummaryResult } from './mail-notification-summary.mjs';
 import { MailHarborError, errorMessages, validateRequest, validateResult } from './validation.mjs';
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 export const DEFAULT_MAX_SPEND_MICROS = 12_000_000; // $12.00 default hard cap (configurable up to $100.00)
 export const MIN_MAX_SPEND_MICROS = 500_000; // $0.50
 export const MAX_MAX_SPEND_MICROS = 100_000_000; // $100.00
@@ -13,9 +13,26 @@ const GEMINI_ORIGIN = 'https://generativelanguage.googleapis.com';
 
 export const GEMINI_MODELS = Object.freeze([
   Object.freeze({
+    id: 'gemini-3.5-flash-lite',
+    fallbackEndpointId: 'gemini-flash-lite-latest',
+    label: 'Gemini 3.5 Flash-Lite ($0.30 / $2.50 per 1M · Newest Flash-Lite · ~$9.80 for remaining backlog)',
+    inputMicrosPer1M: 300_000,
+    cachedMicrosPer1M: 30_000,
+    outputMicrosPer1M: 2_500_000,
+    thinkingConfig: Object.freeze({ thinkingLevel: 'minimal' })
+  }),
+  Object.freeze({
+    id: 'gemini-flash-lite-latest',
+    label: 'Gemini Flash-Lite Latest (Auto-tracks newest Google Flash-Lite)',
+    inputMicrosPer1M: 300_000,
+    cachedMicrosPer1M: 30_000,
+    outputMicrosPer1M: 2_500_000,
+    thinkingConfig: Object.freeze({ thinkingLevel: 'minimal' })
+  }),
+  Object.freeze({
     id: 'gemini-3.1-flash-lite',
     fallbackEndpointId: 'gemini-3.1-flash-lite-preview',
-    label: 'Gemini 3.1 Flash-Lite ($0.25 / $1.50 per 1M · Latest · ~$10 for 56k mails)',
+    label: 'Gemini 3.1 Flash-Lite ($0.25 / $1.50 per 1M · ~$8 for remaining backlog)',
     inputMicrosPer1M: 250_000,
     cachedMicrosPer1M: 25_000,
     outputMicrosPer1M: 1_500_000,
@@ -23,7 +40,7 @@ export const GEMINI_MODELS = Object.freeze([
   }),
   Object.freeze({
     id: 'gemini-2.5-flash-lite',
-    label: 'Gemini 2.5 Flash-Lite ($0.10 / $0.40 per 1M · ~$5 for 56k mails)',
+    label: 'Gemini 2.5 Flash-Lite ($0.10 / $0.40 per 1M · ~$4 for remaining backlog)',
     inputMicrosPer1M: 100_000,
     cachedMicrosPer1M: 25_000,
     outputMicrosPer1M: 400_000,
@@ -31,7 +48,7 @@ export const GEMINI_MODELS = Object.freeze([
   }),
   Object.freeze({
     id: 'gemini-2.5-flash',
-    label: 'Gemini 2.5 Flash ($0.30 / $2.50 per 1M · Richer briefings)',
+    label: 'Gemini 2.5 Flash ($0.30 / $2.50 per 1M)',
     inputMicrosPer1M: 300_000,
     cachedMicrosPer1M: 30_000,
     outputMicrosPer1M: 2_500_000,
