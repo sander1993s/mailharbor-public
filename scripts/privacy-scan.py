@@ -21,7 +21,7 @@ TEST_EMAILS = {'fixture-#@app.web3forms.com', 'mail@app.web3forms.com', 'user@fc
 RULES = [
     ('private key', re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----')),
     ('GitHub token', re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b')),
-    ('provider API key', re.compile(r'\b(?:AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|sk-(?:proj-)?[0-9A-Za-z_-]{32,})\b')),
+    ('provider API key', re.compile(r'\b(?:AIza[0-9A-Za-z_-]{35}|AQ\.Ab8[0-9A-Za-z_.-]{28,}|AKIA[0-9A-Z]{16}|sk-(?:proj-)?[0-9A-Za-z_-]{32,})\b')),
     ('credential-bearing URL', re.compile(r'\b(?:https?|imaps?|smtps?)://[^\s/\"\x27:@]+:[^\s/\"\x27@]+@')),
     ('personal Windows home', re.compile(r'[A-Za-z]:[\\/]+Users[\\/]+(?!<|example\b|user\b|username\b)[A-Za-z0-9_.-]+', re.I)),
     ('private Tailscale hostname', re.compile(r'\b[a-z0-9-]+\.tail[a-f0-9]{6,}\.ts\.net\b', re.I)),

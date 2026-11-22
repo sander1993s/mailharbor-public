@@ -77,7 +77,7 @@ function parseRetryDelayMs(headers, text) {
 }
 
 function validApiKey(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9_-]{20,256}$/u.test(value.trim());
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{19,255}$/u.test(value.trim());
 }
 
 function normalizeState(raw) {

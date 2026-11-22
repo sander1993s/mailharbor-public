@@ -10,7 +10,7 @@ import { createMailboxSession } from '../server/mailboxes.mjs';
 import { createAccountStore } from '../server/account-store.mjs';
 import { createWebFactory } from '../server/web-app.mjs';
 
-const TEST_KEY = 'test-gemini-key-0123456789abcdef';
+const TEST_KEY = 'AQ.test-gemini-key-0123456789abcdef';
 
 function memoryStore(initial = {}) {
   let doc = structuredClone(initial);
