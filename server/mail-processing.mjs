@@ -291,18 +291,23 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       let result;
       try { result = await timed('read_flags', () => reader.markRead(account, batch.map(value => value.location.reference), { signal: signal(), verify: () => verify(account) })); }
       catch (error) {
-        if (signal().aborted || !['mailbox_error', 'mailbox_timeout', 'mailbox_login_required'].includes(error.code)) throw error;
-        verify(account);
-        index.transaction(() => {
-          recordError(error, account);
-          backoff(account, error);
-          const until = Math.max(now() + INTERVAL, settings.accountBackoff?.[account.id]?.until ?? 0);
-          settings.readBackoff ??= {};
-          settings.readBackoff[account.id] = { revision: account.revision, until };
-          for (const entry of batch) { entry.location.readRetryAt = until; put(entry.record); }
-          save();
-        });
-        return;
+        if (!signal().aborted && error.code === 'stale_message') {
+          verify(account);
+          result = { results: batch.map(value => ({ reference: value.location.reference, status: 'changed' })) };
+        } else {
+          if (signal().aborted || !['mailbox_error', 'mailbox_timeout', 'mailbox_login_required'].includes(error.code)) throw error;
+          verify(account);
+          index.transaction(() => {
+            recordError(error, account);
+            backoff(account, error);
+            const until = Math.max(now() + INTERVAL, settings.accountBackoff?.[account.id]?.until ?? 0);
+            settings.readBackoff ??= {};
+            settings.readBackoff[account.id] = { revision: account.revision, until };
+            for (const entry of batch) { entry.location.readRetryAt = until; put(entry.record); }
+            save();
+          });
+          return;
+        }
       }
       verify(account);
       accountRecovered(account);
@@ -468,8 +473,13 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
           verify(account); recordError(error, account); backoff(account, error); save();
           continue;
         }
-        if (signal().aborted || !['mailbox_error', 'mailbox_timeout'].includes(error.code)) throw error;
-        result = { messages: [], errors: records.map(record => ({ reference: record.reference, code: error.code, mailboxDiagnostic: error.mailboxDiagnostic })) };
+        if (!signal().aborted && ['stale_message', 'mailbox_not_found'].includes(error.code)) {
+          verify(account);
+          result = { messages: [], errors: records.map(record => ({ reference: record.reference, code: 'stale_message' })) };
+        } else {
+          if (signal().aborted || !['mailbox_error', 'mailbox_timeout'].includes(error.code)) throw error;
+          result = { messages: [], errors: records.map(record => ({ reference: record.reference, code: error.code, mailboxDiagnostic: error.mailboxDiagnostic })) };
+        }
       }
       verify(account);
       const authentication = result.errors?.find(error => error.code === 'mailbox_login_required');
@@ -517,6 +527,21 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
         if (error.code === 'mailbox_login_required') continue;
         const record = records.find(record => record.reference.fingerprint === error.reference.fingerprint);
         if (record) {
+          const fallbackLocation = error.code === 'stale_message' && !record.ownerDecision &&
+            !record.locations.some(value => value.intent) && !(record.classificationError && record.retryAt == null) ?
+            record.locations.find(value => locationKey(value.reference) !== locationKey(error.reference) &&
+              !value.handled && value.reference.fingerprint === record.reference.fingerprint) : null;
+          if (fallbackLocation) {
+            const staleLocation = record.locations.find(value => locationKey(value.reference) === locationKey(error.reference));
+            if (staleLocation) record.locations = record.locations.filter(value => value !== staleLocation);
+            record.reference = fallbackLocation.reference;
+            if (record.message) record.message = { ...record.message, folderPath: fallbackLocation.reference.path };
+            record.readError = null; record.readRetryAt = null; record.readAttempts = 0;
+            record.nextAt = now();
+            if (record.retryAt != null) record.retryAt = now();
+            put(record);
+            continue;
+          }
           record.readAttempts = (record.readAttempts ?? 0) + 1;
           record.readError = error.code;
           record.retryAt = null;
@@ -629,7 +654,9 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       // Notifications share the provider queue; their wait is not evidence that
       // this classification batch is close to its own execution timeout.
       const maxBatch = fastMode ? 35 : 12;
-      settings.fastSuccesses = providerElapsed < BATCH_GROWTH_LATENCY && inputs.length === settings.batchSize ? (settings.fastSuccesses ?? 0) + 1 : 0;
+      const fullEnough = inputs.length === settings.batchSize ||
+        (fastMode && candidates.length === settings.batchSize && inputs.length >= Math.floor(settings.batchSize * 0.8));
+      settings.fastSuccesses = providerElapsed < BATCH_GROWTH_LATENCY && fullEnough ? (settings.fastSuccesses ?? 0) + 1 : 0;
       if (fastMode && providerElapsed < 15000 && settings.fastSuccesses >= 2) {
         settings.batchSize = Math.min(maxBatch, Math.max(20, settings.batchSize * 2));
         settings.fastSuccesses = 0;
@@ -846,7 +873,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       if (entries.length) {
         try { await timed('moves', () => moveEntries(account, entries)); if (entries.some(entry => entry.finished)) accountRecovered(account); }
         catch (error) {
-          if (signal().aborted || !['mailbox_error', 'mailbox_timeout', 'mailbox_login_required'].includes(error.code)) throw error;
+          if (signal().aborted || !['mailbox_error', 'mailbox_timeout', 'mailbox_login_required', 'stale_message'].includes(error.code)) throw error;
           verify(account);
           backoff(account, error);
           // One failed/uncertain move must not starve every pending classification.
@@ -1252,6 +1279,7 @@ export function createMailProcessing({ index, store, accounts, reader, tags, job
       if (fault || index.healthy?.() === false) throw new MailHarborError('configuration_error');
       jobs?.retryAuthentication?.();
       settings.enabled = true; settings.mode = action === 'preview' ? 'preview' : 'apply';
+      if (action === 'start' && jobs?.isFastMode?.() && !settings.probeKey && settings.batchSize < 25) settings.batchSize = 25;
       if (settings.pauseReason !== 'quota_exhausted') settings.retryAt = null;
       if (action === 'preview') settings.preview = { sampleSize: 0, labels: {}, counts: { archive: 0, trash: 0, markRead: 0, rescue: 0, review: 0 } };
       settings.pauseReason = null; save(); launch().catch(() => {}); return status();

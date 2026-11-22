@@ -1,5 +1,5 @@
 // Only the public application shell is cached. Mail, sessions, and OAuth never enter Cache Storage.
-const CACHE = 'mailharbor-shell-v0.9.2';
+const CACHE = 'mailharbor-shell-v0.9.3';
 const ASSETS = ['/', '/index.html', '/app.mjs', '/account-setup.mjs', '/agy-login.mjs', '/gemini-settings.mjs', '/api-request.mjs', '/mail.mjs', '/mail-attachments.mjs', '/mail-attachments.css', '/mail-conversation.mjs', '/mail-tools.mjs', '/mail-filter-preferences.mjs', '/mail-tools.css', '/telegram-settings.mjs', '/controls.mjs', '/controls.css', '/mail-content.mjs', '/mail-content.css', '/compose.mjs', '/compose.css', '/filing.mjs', '/processing.mjs', '/processing.css', '/styles.css', '/logo.png', '/manifest.webmanifest', '/vendor/pdfjs/pdf.mjs', '/vendor/pdfjs/pdf.worker.mjs'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));

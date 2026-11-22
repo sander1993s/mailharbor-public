@@ -1964,3 +1964,54 @@ test('category moves wait for queued or protected invoice filing and become elig
   });
   assert.equal(index.get('messages', unseenKey), null);
 });
+
+test('stale folder UIDVALIDITY or missing folder on a retry item retires only the stale reference and recovers surviving locations without pausing run', async t => {
+  const index = memoryIndex();
+  const staleJunk = mail(11, { unread: false, folderPath: 'Junk', role: 'junk',
+    reference: { accountId: account.id, path: 'Junk', uid: 11, uidValidity: '459', fingerprint: hash('message-11') } });
+  const staleWithArchive = mail(12, { unread: false, folderPath: 'Junk', role: 'junk',
+    date: '2026-09-10T12:00:00Z', receivedAt: '2026-09-10T12:00:00Z',
+    reference: { accountId: account.id, path: 'Junk', uid: 12, uidValidity: '459', fingerprint: hash('message-12') } });
+  const archiveCopy = { accountId: account.id, path: 'Archive', uid: 88, uidValidity: '100', fingerprint: hash('message-12') };
+  const healthy = mail(13, { unread: false });
+
+  const staleId = seed(index, staleJunk, null);
+  const staleRec = index.get('messages', staleId);
+  Object.assign(staleRec, { classificationError: 'timeout', classificationAttempts: 1, retryAt: stamp - 1000, nextAt: stamp - 1000 });
+  index.put('messages', staleId, staleRec, { state: 'pending', category: 'retry', due: stamp - 1000, owner: index.token(`processing:${account.id}:${account.email}`) });
+
+  const recoverId = seed(index, staleWithArchive, null);
+  const recoverRec = index.get('messages', recoverId);
+  recoverRec.locations.push({ reference: archiveCopy, role: 'archive', read: true, handled: null, gmail: false, emailId: null });
+  index.put('messages', recoverId, recoverRec, { state: 'pending', due: stamp - 500, owner: index.token(`processing:${account.id}:${account.email}`) });
+
+  const healthyId = seed(index, healthy, null);
+  index.put('folders', hash([account.id, account.email, 'INBOX']), { afterUid: 13, uidValidity: '100', accountId: account.id, done: true });
+  index.put('folders', hash([account.id, account.email, 'Archive']), { afterUid: 88, uidValidity: '100', accountId: account.id, done: true });
+
+  const h = harness(t, {
+    index,
+    messages: [healthy, mail(88, { unread: false, folderPath: 'Archive', role: 'archive', reference: archiveCopy })],
+    folders: [{ path: 'INBOX', role: 'inbox' }, { path: 'Archive', role: 'archive' }],
+    readerOverrides: {
+      async readBatch(_, references) {
+        if (references[0].uidValidity === '459') throw new MailHarborError('stale_message');
+        return {
+          messages: references.map(ref => ({ ...mail(ref.uid, { unread: false, folderPath: ref.path }), reference: ref,
+            body: 'Valid body text for classification.', bodyUnavailable: false, truncated: false })),
+          errors: []
+        };
+      }
+    }
+  });
+
+  const result = await h.run();
+  assert.equal(result.lastRun.status, 'partial');
+  assert.equal(result.pauseReason, null);
+  assert.equal(result.counts.analyzed, 2);
+  assert.equal(index.get('messages', staleId).readError, 'stale_message');
+  assert.equal(index.get('messages', staleId).readRetryAt, null);
+  assert.equal(index.get('messages', healthyId).classification?.labels[0], 'jobs');
+  assert.equal(index.get('messages', recoverId).classification?.labels[0], 'jobs');
+  assert.equal(index.get('messages', recoverId).reference.path, 'Archive');
+});

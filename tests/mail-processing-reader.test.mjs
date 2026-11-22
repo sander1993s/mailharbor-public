@@ -229,6 +229,17 @@ test('readBatch shares one connection, completes metadata FETCH before bounded M
   assert.equal(h.calls.some(call => ['move', 'seen'].includes(call.action)), false);
 });
 
+test('readBatch reports stale_message per reference when UIDVALIDITY rotated or folder disappeared, unless account verification fails', async () => {
+  const stale = { ...reference(mail(1)), uidValidity: '459' };
+  const missingFolder = { ...reference(mail(2)), path: 'DeletedFolder' };
+  const h = harness({ folders: [{ path: 'INBOX', uidValidity: 534n, messages: [mail(1)] }] });
+  const rotated = await h.reader.readBatch(account, [stale], { verify });
+  assert.deepEqual(rotated, { messages: [], errors: [{ reference: stale, code: 'stale_message' }] });
+  const absent = await h.reader.readBatch(account, [missingFolder], { verify });
+  assert.deepEqual(absent, { messages: [], errors: [{ reference: missingFolder, code: 'stale_message' }] });
+  await assert.rejects(h.reader.readBatch(account, [stale], { verify: async () => false }), { code: 'stale_message' });
+});
+
 test('scan and body batches ignore unrelated FETCH and incomplete notifications before complete rows', async () => {
   for (const operation of ['scan', 'readBatch']) {
     const h = harness({ beforeFetchRows: [{ uid: 99, flags: new Set(['\\Deleted']) }, { uid: 1, flags: new Set(['\\Seen']) }] });

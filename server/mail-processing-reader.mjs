@@ -332,9 +332,17 @@ export function createMailProcessingReader({ connectionOptions, createClient, se
     if (!references.length) return { messages: [], errors: [] };
     return session(account, signal, async client => {
       await verifyNow(verify, client, signal);
-      const { folders, gmail } = await mapped(client, account, signal), folder = findFolder(folders, references[0].path);
+      const { folders, gmail } = await mapped(client, account, signal);
+      const folder = folders.find(value => equalPath(value.path, references[0].path));
+      if (!folder) {
+        await verifyNow(verify, client, signal);
+        return { messages: [], errors: references.map(reference => ({ reference, code: 'stale_message' })) };
+      }
       return locked(client, folder.path, true, async uidValidity => {
-        if (uidValidity !== references[0].uidValidity) fail('stale_message');
+        if (uidValidity !== references[0].uidValidity) {
+          await verifyNow(verify, client, signal);
+          return { messages: [], errors: references.map(reference => ({ reference, code: 'stale_message' })) };
+        }
         const expected = new Map(references.map(reference => [reference.uid, reference]));
         const fetched = collectExpectedHeaders(expected, { gmail, bodyStructure: true });
         for await (const message of client.fetch([...expected.keys()].join(','), { ...HEADERS, bodyStructure: true,
@@ -343,7 +351,10 @@ export function createMailProcessingReader({ connectionOptions, createClient, se
           fetched.add(message);
         }
         live(client, signal);
-        if (validity(client, folder.path) !== uidValidity) fail('stale_message');
+        if (validity(client, folder.path) !== uidValidity) {
+          await verifyNow(verify, client, signal);
+          return { messages: [], errors: references.map(reference => ({ reference, code: 'stale_message' })) };
+        }
         const messages = [], errors = [];
         for (const reference of references) {
           const message = fetched.get(reference.uid);

@@ -21,7 +21,7 @@ from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHand
 
 CONFIG = Path(os.environ.get("MAILHARBOR_CONFIG", str(Path.home() / ".config/mailharbor/config.json")))
 ORIGIN = ""
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 TIMEOUT = 180
 MAX_RESPONSE = 1024 * 1024
 FOLDERS = {"all", "inbox", "unread", "starred", "sent", "drafts", "archive", "junk", "trash"} | {"tag:" + tag for tag in ("coupons", "development", "social", "jobs", "security", "travel", "work", "newsletters", "finance", "invoices", "tenders", "appointments", "orders")}
