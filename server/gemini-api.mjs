@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { buildPrompt } from './runner.mjs';
 import { createMailClassifier, validateWireRequest, classificationPrompt, normalizeWireResult } from './mail-classifier.mjs';
+import { MAIL_CATEGORIES, MAIL_CLASSIFICATION_SCHEMA, normalizeMailDate, parseMailDate } from './mail-policy.mjs';
 import { validateNotificationSummaryRequest, notificationSummaryPrompt, notificationSummaryResult } from './mail-notification-summary.mjs';
 import { MailHarborError, errorMessages, validateRequest, validateResult } from './validation.mjs';
 
@@ -57,6 +58,119 @@ export const GEMINI_MODELS = Object.freeze([
 ]);
 
 const MODEL_MAP = new Map(GEMINI_MODELS.map(model => [model.id, model]));
+const CATEGORY_IDS = Object.freeze(MAIL_CATEGORIES.map(category => category.id));
+const MAIL_SAFETY_SETTINGS = Object.freeze([
+  Object.freeze({ category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' }),
+  Object.freeze({ category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' }),
+  Object.freeze({ category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' }),
+  Object.freeze({ category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }),
+  Object.freeze({ category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' })
+]);
+
+function buildClassificationResponseSchema(expectedIds) {
+  return {
+    type: 'OBJECT',
+    required: ['items'],
+    properties: {
+      items: {
+        type: 'ARRAY',
+        minItems: expectedIds.length,
+        maxItems: expectedIds.length,
+        items: {
+          type: 'OBJECT',
+          required: ['id', 'labels', 'confidence', 'junk', 'junkConfidence'],
+          properties: {
+            id: { type: 'STRING', enum: expectedIds },
+            labels: {
+              type: 'ARRAY',
+              items: { type: 'STRING', enum: CATEGORY_IDS }
+            },
+            confidence: { type: 'NUMBER' },
+            junk: { type: 'STRING', enum: [...MAIL_CLASSIFICATION_SCHEMA.junkValues] },
+            junkConfidence: { type: 'NUMBER' },
+            dateConfidence: { type: 'NUMBER', nullable: true },
+            dates: {
+              type: 'OBJECT',
+              nullable: true,
+              properties: {
+                couponExpiry: { type: 'STRING', nullable: true },
+                tenderDeadline: { type: 'STRING', nullable: true },
+                appointmentStart: { type: 'STRING', nullable: true },
+                appointmentEnd: { type: 'STRING', nullable: true }
+              }
+            },
+            appointment: {
+              type: 'OBJECT',
+              nullable: true,
+              required: ['title', 'location'],
+              properties: {
+                title: { type: 'STRING' },
+                location: { type: 'STRING' }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+}
+
+function canonicalizeWireClassification(parsed, request) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.items)) return parsed;
+  const maxYear = new Date().getUTCFullYear() + MAIL_CLASSIFICATION_SCHEMA.futureYears;
+  const items = parsed.items.map(raw => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+    const item = {
+      id: raw.id,
+      labels: Array.isArray(raw.labels) ? [...new Set(raw.labels)] : raw.labels,
+      confidence: raw.confidence,
+      junk: raw.junk,
+      junkConfidence: raw.junkConfidence
+    };
+    const labelSet = new Set(Array.isArray(item.labels) ? item.labels : []);
+    if (raw.dates && typeof raw.dates === 'object' && !Array.isArray(raw.dates)) {
+      const cleanDates = {};
+      for (const key of MAIL_CLASSIFICATION_SCHEMA.dateFields) {
+        const val = raw.dates[key];
+        if (typeof val !== 'string' || !val.trim()) continue;
+        const normalized = normalizeMailDate(val.trim());
+        const parsedDate = parseMailDate(normalized);
+        if (!parsedDate || parsedDate.year > maxYear) continue;
+        if (key === 'couponExpiry' && !labelSet.has('coupons')) continue;
+        if (key === 'tenderDeadline' && !labelSet.has('tenders')) continue;
+        if ((key === 'appointmentStart' || key === 'appointmentEnd') && !labelSet.has('appointments')) continue;
+        cleanDates[key] = normalized;
+      }
+      if (cleanDates.appointmentStart || cleanDates.appointmentEnd) {
+        const start = cleanDates.appointmentStart ? parseMailDate(cleanDates.appointmentStart) : null;
+        const end = cleanDates.appointmentEnd ? parseMailDate(cleanDates.appointmentEnd) : null;
+        const startMs = start ? (start.dateOnly ? start.timestamp : Date.parse(cleanDates.appointmentStart)) : NaN;
+        const endMs = end ? (end.dateOnly ? end.timestamp + 86_400_000 : Date.parse(cleanDates.appointmentEnd)) : NaN;
+        if (!start || !end || start.dateOnly !== end.dateOnly || !(endMs > startMs)) {
+          delete cleanDates.appointmentStart;
+          delete cleanDates.appointmentEnd;
+        }
+      }
+      if (Object.keys(cleanDates).length > 0) {
+        item.dates = cleanDates;
+        item.dateConfidence = typeof raw.dateConfidence === 'number' && Number.isFinite(raw.dateConfidence) &&
+          raw.dateConfidence >= 0 && raw.dateConfidence <= 1 ? raw.dateConfidence : 0;
+      }
+    }
+    if (item.dates?.appointmentStart && item.dates?.appointmentEnd &&
+        raw.appointment && typeof raw.appointment === 'object' && !Array.isArray(raw.appointment)) {
+      const title = typeof raw.appointment.title === 'string'
+        ? raw.appointment.title.replace(/[\u0000-\u001f\u007f]/gu, '').trim().slice(0, MAIL_CLASSIFICATION_SCHEMA.titleLimit)
+        : '';
+      const location = typeof raw.appointment.location === 'string'
+        ? raw.appointment.location.replace(/[\u0000-\u001f\u007f]/gu, '').trim().slice(0, MAIL_CLASSIFICATION_SCHEMA.locationLimit)
+        : '';
+      if (title) item.appointment = { title, location };
+    }
+    return item;
+  });
+  return { items };
+}
 
 function failure(code, reason) {
   return new MailHarborError(code, errorMessages[code], reason);
@@ -296,7 +410,7 @@ export function createGeminiApi({ store, fetcher = globalThis.fetch, now = () =>
     return status();
   }
 
-  async function invokeJson({ prompt, maxOutputTokens = 4096, timeoutMs = 90_000, signal, onMetrics, overrideKey, overrideModel, recordSpend = true }) {
+  async function invokeJson({ prompt, responseSchema, safetySettings, maxOutputTokens = 4096, timeoutMs = 90_000, signal, onMetrics, overrideKey, overrideModel, recordSpend = true }) {
     if (signal?.aborted) throw signal.reason ?? failure('cancelled');
     const state = currentState();
     const apiKey = overrideKey !== undefined ? String(overrideKey).trim() : state.apiKey;
@@ -335,8 +449,10 @@ export function createGeminiApi({ store, fetcher = globalThis.fetch, now = () =>
     try {
       const body = JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        ...(safetySettings ? { safetySettings } : {}),
         generationConfig: {
           responseMimeType: 'application/json',
+          ...(responseSchema ? { responseSchema } : {}),
           temperature: 0.1,
           maxOutputTokens,
           thinkingConfig: modelSpec.thinkingConfig
@@ -453,12 +569,14 @@ export function createGeminiApi({ store, fetcher = globalThis.fetch, now = () =>
     const maxOutputTokens = Math.min(8192, Math.max(512, validated.messages.length * 180));
     const parsed = await invokeJson({
       prompt: classificationPrompt(validated),
+      responseSchema: buildClassificationResponseSchema(validated.messages.map(message => message.id)),
+      safetySettings: MAIL_SAFETY_SETTINGS,
       maxOutputTokens,
       timeoutMs: config?.timeoutMs,
       signal,
       onMetrics: config?.onMetrics
     });
-    return normalizeWireResult(parsed, validated);
+    return normalizeWireResult(canonicalizeWireClassification(parsed, validated), validated);
   };
 
   const classificationRunner = createMailClassifier({ runWire: runWireClassification });
@@ -467,6 +585,7 @@ export function createGeminiApi({ store, fetcher = globalThis.fetch, now = () =>
     const request = validateRequest(requestValue);
     const parsed = await invokeJson({
       prompt: buildPrompt(request),
+      safetySettings: MAIL_SAFETY_SETTINGS,
       maxOutputTokens: 8192,
       timeoutMs: config?.timeoutMs,
       signal,
@@ -479,6 +598,7 @@ export function createGeminiApi({ store, fetcher = globalThis.fetch, now = () =>
     const request = validateNotificationSummaryRequest(requestValue);
     const parsed = await invokeJson({
       prompt: notificationSummaryPrompt(request),
+      safetySettings: MAIL_SAFETY_SETTINGS,
       maxOutputTokens: Math.min(8192, Math.max(512, request.messages.length * 250)),
       timeoutMs: config?.timeoutMs,
       signal,

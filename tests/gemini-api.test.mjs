@@ -97,6 +97,65 @@ test('gemini-api configures encrypted state, redacts keys, disables thinking ove
   assert.equal(reset.requests, 0);
 });
 
+test('gemini-api classification sends constrained responseSchema + BLOCK_NONE safetySettings and canonicalizes nullable optional fields', async () => {
+  const store = memoryStore();
+  let capturedBody = null;
+  const gemini = createGeminiApi({
+    store,
+    fetcher: async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return geminiJsonResponse({
+        items: [
+          {
+            id: 'm0',
+            labels: ['development', 'development'],
+            confidence: 0.98,
+            junk: 'legitimate',
+            junkConfidence: 0.99,
+            dates: null,
+            dateConfidence: null,
+            appointment: null
+          },
+          {
+            id: 'm1',
+            labels: ['appointments'],
+            confidence: 0.96,
+            junk: 'legitimate',
+            junkConfidence: 0.99,
+            dates: {
+              couponExpiry: '2026-12-31',
+              tenderDeadline: null,
+              appointmentStart: '2026-11-25T14:00Z',
+              appointmentEnd: null
+            },
+            dateConfidence: null,
+            appointment: { title: 'Incomplete end time', location: '' }
+          }
+        ]
+      });
+    }
+  });
+  await gemini.configure({ apiKey: TEST_KEY, enabled: true, model: 'gemini-3.5-flash-lite', maxSpendUsd: 12 });
+  const id0 = '1'.repeat(64);
+  const id1 = '2'.repeat(64);
+  const result = await gemini.classificationRunner({
+    messages: [
+      { id: id0, subject: 'PR merged', author: 'bot@example.test', to: 'owner@example.test', date: '2026-11-20T10:00:00Z', folderKind: 'inbox', body: 'Merged pull request #12.', complete: true },
+      { id: id1, subject: 'Dentist', author: 'clinic@example.test', to: 'owner@example.test', date: '2026-11-20T11:00:00Z', folderKind: 'inbox', body: 'Appointment starts 14:00.', complete: true }
+    ]
+  });
+
+  assert.equal(capturedBody.generationConfig.responseSchema?.properties?.items?.minItems, 2);
+  assert.equal(capturedBody.safetySettings?.every(item => item.threshold === 'BLOCK_NONE'), true);
+  assert.deepEqual(result.items[0].labels, ['development']);
+  assert.equal(result.items[0].appointment, null);
+  assert.equal(result.items[0].dateConfidence, 0);
+  // Partial appointment without appointmentEnd conservatively clears appointment dates so policy holds for confirmation
+  assert.equal(result.items[1].dates.couponExpiry, null);
+  assert.equal(result.items[1].dates.appointmentStart, null);
+  assert.equal(result.items[1].appointment, null);
+});
+
 test('gemini-api pre-flight reservation strictly prevents concurrent batches from exceeding the hard USD spend cap', async () => {
   const store = memoryStore();
   let inFlight = 0;
