@@ -145,7 +145,8 @@ test('gemini-api classification sends constrained responseSchema + BLOCK_NONE sa
     ]
   });
 
-  assert.equal(capturedBody.generationConfig.responseSchema?.properties?.items?.minItems, 2);
+  assert.equal(capturedBody.generationConfig.responseSchema?.properties?.items?.type, 'ARRAY');
+  assert.equal('minItems' in (capturedBody.generationConfig.responseSchema?.properties?.items ?? {}), false);
   assert.equal(capturedBody.safetySettings?.every(item => item.threshold === 'BLOCK_NONE'), true);
   assert.deepEqual(result.items[0].labels, ['development']);
   assert.equal(result.items[0].appointment, null);

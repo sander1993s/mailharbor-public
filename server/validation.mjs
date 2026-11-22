@@ -1,5 +1,5 @@
 export const MODEL = 'gemini-3.8-flash-high';
-export const VERSION = '0.9.4';
+export const VERSION = '0.9.5';
 export const MAX_REQUEST_BYTES = 512 * 1024;
 
 // Only these fixed values may cross the API/persistence boundary. Provider text,

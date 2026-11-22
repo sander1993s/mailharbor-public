@@ -67,20 +67,18 @@ const MAIL_SAFETY_SETTINGS = Object.freeze([
   Object.freeze({ category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' })
 ]);
 
-function buildClassificationResponseSchema(expectedIds) {
+function buildClassificationResponseSchema() {
   return {
     type: 'OBJECT',
     required: ['items'],
     properties: {
       items: {
         type: 'ARRAY',
-        minItems: expectedIds.length,
-        maxItems: expectedIds.length,
         items: {
           type: 'OBJECT',
           required: ['id', 'labels', 'confidence', 'junk', 'junkConfidence'],
           properties: {
-            id: { type: 'STRING', enum: expectedIds },
+            id: { type: 'STRING' },
             labels: {
               type: 'ARRAY',
               items: { type: 'STRING', enum: CATEGORY_IDS }
@@ -569,7 +567,7 @@ export function createGeminiApi({ store, fetcher = globalThis.fetch, now = () =>
     const maxOutputTokens = Math.min(8192, Math.max(512, validated.messages.length * 180));
     const parsed = await invokeJson({
       prompt: classificationPrompt(validated),
-      responseSchema: buildClassificationResponseSchema(validated.messages.map(message => message.id)),
+      responseSchema: buildClassificationResponseSchema(),
       safetySettings: MAIL_SAFETY_SETTINGS,
       maxOutputTokens,
       timeoutMs: config?.timeoutMs,
